@@ -1,0 +1,119 @@
+esphome:
+  name: nartis-rf-meter
+  friendly_name: Nartis RF Meter
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable logging — DEBUG shows state transitions and hex dumps,
+# VERBOSE shows individual RX chunk arrivals
+logger:
+  level: DEBUG
+  logs:
+    nartis_rf_meter: DEBUG
+    cmt2300a_hal: DEBUG
+    rf_data: DEBUG
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Nartis-RF-Fallback"
+    password: !secret fallback_password
+
+# Time source — needed for beacon RTC timestamp
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+# Web server for easy debugging without HA
+web_server:
+  port: 80
+
+# External component — our nartis_rf_meter
+external_components:
+  - source:
+      type: local
+      path: components
+
+# CMT2300A RF transceiver wiring (ESP32 GPIOs — adjust to your board):
+#
+#   CMT2300A pin  ->  ESP32 GPIO
+#   SDIO (data)   ->  GPIO23
+#   SCLK (clock)  ->  GPIO18
+#   CSB  (reg CS)  -> GPIO5
+#   FCSB (FIFO CS) -> GPIO17
+#   GPIO1 (IRQ)    -> GPIO16
+#   VDD            -> 3.3V
+#   GND            -> GND
+#
+nartis_rf_meter:
+  id: nartis
+  # CMT2300A pins
+  pin_sdio: GPIO23
+  pin_sclk: GPIO18
+  pin_csb: GPIO27
+  pin_fcsb: GPIO26
+  pin_gpio1: GPIO34
+  # Meter serial number (from meter nameplate, e.g., "12345678")
+  meter_serial: "YOUR_METER_SERIAL"
+  # CIU serial — if replacing an existing CIU device, put its serial here;
+  # if omitted, ESP32 MAC address is used (fresh pairing)
+  # ciu_serial: "YOUR_CIU_SERIAL"
+  # AES key — factory default, override only if meter has custom key
+  # aes_key: "ZCZfuT666iRdgPNH"
+  # How often to poll the meter (default 60s)
+  update_interval: 60s
+
+# Sensors — OBIS codes for common Nartis I100/I300 registers
+sensor:
+  # Total active energy import (kWh) — OBIS 1.0.1.8.0.255
+  - platform: nartis_rf_meter
+    nartis_rf_meter_id: nartis
+    name: "Total Energy"
+    obis_code: "1.0.1.8.0.255"
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 3
+    device_class: energy
+    state_class: total_increasing
+
+  # Instantaneous active power (W) — OBIS 1.0.1.7.0.255
+  - platform: nartis_rf_meter
+    nartis_rf_meter_id: nartis
+    name: "Active Power"
+    obis_code: "1.0.1.7.0.255"
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    state_class: measurement
+
+  # Voltage (V) — OBIS 1.0.32.7.0.255
+  - platform: nartis_rf_meter
+    nartis_rf_meter_id: nartis
+    name: "Voltage"
+    obis_code: "1.0.32.7.0.255"
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+
+  # Current (A) — OBIS 1.0.31.7.0.255
+  - platform: nartis_rf_meter
+    nartis_rf_meter_id: nartis
+    name: "Current"
+    obis_code: "1.0.31.7.0.255"
+    unit_of_measurement: "A"
+    accuracy_decimals: 3
+    device_class: current
+    state_class: measurement

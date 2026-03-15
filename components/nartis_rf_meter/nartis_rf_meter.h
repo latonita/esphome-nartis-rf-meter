@@ -66,8 +66,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void register_text_sensor(esphome::text_sensor::TextSensor *s, const ObisCode &obis,
                             uint16_t class_id, uint8_t attr_id);
 
- protected:
-  /* ---- State machine ---- */
+  /* ---- State machine (public for logging helper) ---- */
   enum class State : uint8_t {
     NOT_INITIALIZED,
     IDLE,
@@ -90,6 +89,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     // Error recovery
     ERROR_RECOVERY,
   };
+
+ protected:
 
   void set_state_(State new_state);
   void handle_state_();

@@ -7,6 +7,7 @@
 #include "nartis_rf_meter.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/time.h"
 
 #include <esp_mac.h>
@@ -46,6 +47,10 @@ void NartisRfMeterComponent::setup() {
   set_state_(State::IDLE);
 
   ESP_LOGI(TAG, "Nartis RF Meter ready. %d sensor(s) registered.", (int) sensors_.size());
+  ESP_LOGI(TAG, "AES key: %s", format_hex_pretty(aes_key_, AES_KEY_SIZE).c_str());
+  uint8_t addr_bytes[8];
+  address_.to_bytes(addr_bytes);
+  ESP_LOGI(TAG, "RF address (8 bytes): %s", format_hex_pretty(addr_bytes, 8).c_str());
 }
 
 void NartisRfMeterComponent::dump_config() {
@@ -130,7 +135,28 @@ void NartisRfMeterComponent::register_text_sensor(esphome::text_sensor::TextSens
  * State Machine
  * ================================================================ */
 
+static const LogString *state_to_str(NartisRfMeterComponent::State s) {
+  switch (s) {
+    case NartisRfMeterComponent::State::NOT_INITIALIZED: return LOG_STR("NOT_INITIALIZED");
+    case NartisRfMeterComponent::State::IDLE: return LOG_STR("IDLE");
+    case NartisRfMeterComponent::State::RSSI_SCAN: return LOG_STR("RSSI_SCAN");
+    case NartisRfMeterComponent::State::CHANNEL_SELECT: return LOG_STR("CHANNEL_SELECT");
+    case NartisRfMeterComponent::State::BEACON_TX: return LOG_STR("BEACON_TX");
+    case NartisRfMeterComponent::State::BEACON_WAIT_TX_DONE: return LOG_STR("BEACON_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::BEACON_WAIT_RESPONSE: return LOG_STR("BEACON_WAIT_RESPONSE");
+    case NartisRfMeterComponent::State::GET_TX: return LOG_STR("GET_TX");
+    case NartisRfMeterComponent::State::GET_WAIT_TX_DONE: return LOG_STR("GET_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::GET_WAIT_RESPONSE: return LOG_STR("GET_WAIT_RESPONSE");
+    case NartisRfMeterComponent::State::ACK_TX: return LOG_STR("ACK_TX");
+    case NartisRfMeterComponent::State::ACK_WAIT_TX_DONE: return LOG_STR("ACK_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::PUBLISH: return LOG_STR("PUBLISH");
+    case NartisRfMeterComponent::State::ERROR_RECOVERY: return LOG_STR("ERROR_RECOVERY");
+    default: return LOG_STR("UNKNOWN");
+  }
+}
+
 void NartisRfMeterComponent::set_state_(State new_state) {
+  ESP_LOGD(TAG, "State: %s -> %s", LOG_STR_ARG(state_to_str(state_)), LOG_STR_ARG(state_to_str(new_state)));
   state_ = new_state;
   state_entered_ms_ = esphome::millis();
 }
@@ -158,12 +184,16 @@ void NartisRfMeterComponent::handle_state_() {
     case State::BEACON_WAIT_RESPONSE: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
-        ESP_LOGD(TAG, "Beacon response received (%d bytes)", (int) rx_accum_len_);
+        ESP_LOGI(TAG, "Beacon response received (%d bytes)", (int) rx_accum_len_);
         // Parse and validate beacon response (ACK frame)
         uint8_t payload[MAX_DLMS_APDU_SIZE];
         RfFrameType rx_type;
         int payload_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
         if (payload_len >= 0) {
+          ESP_LOGI(TAG, "Beacon response OK (type=0x%02X, payload=%d bytes)", static_cast<uint8_t>(rx_type), payload_len);
+          if (payload_len > 0) {
+            ESP_LOGD(TAG, "Beacon payload: %s", format_hex_pretty(payload, payload_len).c_str());
+          }
           // No separate AARQ — go directly to data requests
           set_state_(State::GET_TX);
         } else {
@@ -290,7 +320,7 @@ void NartisRfMeterComponent::handle_channel_select_() {
 }
 
 void NartisRfMeterComponent::handle_beacon_tx_() {
-  ESP_LOGD(TAG, "Sending beacon...");
+  ESP_LOGI(TAG, "Sending beacon (frame_counter=%u, seq=%d)...", (unsigned) rf_.get_frame_counter(), sequence_nr_);
 
   // Build 29-byte beacon payload matching firmware beacon_address_builder (0xB5B0)
   uint8_t beacon_payload[29];
@@ -300,6 +330,9 @@ void NartisRfMeterComponent::handle_beacon_tx_() {
     set_state_(State::ERROR_RECOVERY);
     return;
   }
+
+  ESP_LOGD(TAG, "Beacon payload (%d bytes): %s", (int) payload_len,
+           format_hex_pretty(beacon_payload, payload_len).c_str());
 
   size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
                                      RfFrameType::BEACON, 0x00, sequence_nr_++,
@@ -343,7 +376,11 @@ void NartisRfMeterComponent::handle_get_tx_() {
   }
 
   const auto &entry = sensors_[current_sensor_idx_];
-  ESP_LOGD(TAG, "Read request for sensor %d/%d", current_sensor_idx_ + 1, (int) sensors_.size());
+  ESP_LOGI(TAG, "Read request for sensor %d/%d — OBIS %d.%d.%d.%d.%d.%d class=%d attr=%d",
+           current_sensor_idx_ + 1, (int) sensors_.size(),
+           entry.obis.bytes[0], entry.obis.bytes[1], entry.obis.bytes[2],
+           entry.obis.bytes[3], entry.obis.bytes[4], entry.obis.bytes[5],
+           entry.class_id, entry.attr_id);
 
   // Build proprietary read request (C0 01 C1 00 [class] [obis] [attr] 00)
   uint8_t apdu[16];
@@ -373,12 +410,14 @@ void NartisRfMeterComponent::handle_get_tx_() {
 }
 
 void NartisRfMeterComponent::handle_get_response_() {
+  ESP_LOGI(TAG, "GET response received (%d bytes) for sensor %d", (int) rx_accum_len_, current_sensor_idx_);
+
   uint8_t payload[MAX_DLMS_APDU_SIZE];
   RfFrameType rx_type;
 
   int payload_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
   if (payload_len < 0) {
-    ESP_LOGW(TAG, "Failed to parse response frame");
+    ESP_LOGW(TAG, "Failed to parse response frame (type=0x%02X)", rx_accum_len_ > 1 ? rx_accum_buf_[1] : 0);
     retry_count_++;
     if (retry_count_ >= MAX_RETRIES_) {
       current_sensor_idx_++;
@@ -389,10 +428,14 @@ void NartisRfMeterComponent::handle_get_response_() {
     return;
   }
 
+  ESP_LOGD(TAG, "GET payload (%d bytes, type=0x%02X): %s",
+           payload_len, static_cast<uint8_t>(rx_type),
+           format_hex_pretty(payload, payload_len).c_str());
+
   DlmsValue value;
   if (dlms_.parse_read_response(payload, payload_len, &value)) {
     sensors_[current_sensor_idx_].last_value = value;
-    ESP_LOGD(TAG, "Got value for sensor %d (type=%d)", current_sensor_idx_, value.type);
+    ESP_LOGI(TAG, "Sensor %d value OK (type=%d)", current_sensor_idx_, value.type);
   } else {
     ESP_LOGW(TAG, "Failed to parse read response data");
   }
@@ -504,6 +547,8 @@ void NartisRfMeterComponent::handle_error_recovery_() {
 
 bool NartisRfMeterComponent::transmit_frame_(RfFrameType type,
                                              const uint8_t *frame, size_t len) {
+  ESP_LOGI(TAG, "TX frame (%d bytes, type=0x%02X):", (int) len, static_cast<uint8_t>(type));
+  ESP_LOGD(TAG, "TX: %s", format_hex_pretty(frame, len).c_str());
   // Use chunked TX for all frames — handles packets > 64 bytes
   // (AARQ can be ~80-100B after CRC framing, beacons ~60-70B)
   return hal_.transmit_chunked(frame, len);
@@ -661,6 +706,9 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
   // Drain any chunks the ISR has queued
   size_t drained = hal_.drain_rx_queue(rx_accum_buf_ + rx_accum_len_,
                                        MAX_RF_FRAME_SIZE - rx_accum_len_);
+  if (drained > 0) {
+    ESP_LOGV(TAG, "RX drained +%d bytes (total %d)", (int) drained, (int) (rx_accum_len_ + drained));
+  }
   rx_accum_len_ += drained;
 
   // Extract expected length from first byte once we have it
@@ -676,10 +724,11 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
   // Check if we have the complete packet
   if (rx_expected_len_ > 0 && rx_accum_len_ >= rx_expected_len_) {
-    ESP_LOGD(TAG, "RX complete: %d/%d bytes", (int) rx_accum_len_, (int) rx_expected_len_);
-    finish_rx_();
     // Trim to expected length (last chunk may have extra bytes)
     rx_accum_len_ = rx_expected_len_;
+    ESP_LOGI(TAG, "RX complete: %d bytes", (int) rx_accum_len_);
+    ESP_LOGD(TAG, "RX: %s", format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+    finish_rx_();
     return RxStatus::COMPLETE;
   }
 
@@ -692,8 +741,11 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
   // Check timeout
   if (elapsed > RX_TIMEOUT_MS_) {
-    ESP_LOGD(TAG, "RX timeout (%d/%d bytes received)",
-             (int) rx_accum_len_, (int) rx_expected_len_);
+    ESP_LOGW(TAG, "RX timeout (%d/%d bytes received in %dms)",
+             (int) rx_accum_len_, (int) rx_expected_len_, (int) elapsed);
+    if (rx_accum_len_ > 0) {
+      ESP_LOGD(TAG, "RX partial: %s", format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+    }
     finish_rx_();
     return RxStatus::ERROR;
   }
