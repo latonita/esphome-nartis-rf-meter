@@ -23,6 +23,11 @@ static const char *const TAG = "nartis_rf_meter";
  * ================================================================ */
 
 void NartisRfMeterComponent::setup() {
+  ESP_LOGI(TAG, "Nartis RF Meter: deferring init 10s for network log viewers...");
+  this->set_timeout(10000, [this]() { this->setup_continue_(); });
+}
+
+void NartisRfMeterComponent::setup_continue_() {
   ESP_LOGI(TAG, "Setting up Nartis RF Meter...");
 
   // Initialize HAL

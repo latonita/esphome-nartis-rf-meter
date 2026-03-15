@@ -92,6 +92,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
 
  protected:
 
+  void setup_continue_();
   void set_state_(State new_state);
   void handle_state_();
 
