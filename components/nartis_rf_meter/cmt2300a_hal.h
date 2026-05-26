@@ -95,6 +95,11 @@ class Cmt2300aHal {
   /// Write data to TX FIFO. Returns number of bytes written (limited by FIFO size).
   size_t write_fifo(const uint8_t *data, size_t len);
 
+  /// Set per-TX payload length (PKT14 high bits + PKT15 low byte).
+  /// Firmware writes this before every TX: bank leaves chip in fixed-length mode
+  /// with PKT15=0xFF (511 bytes), so TX_DONE never fires for shorter packets.
+  void set_tx_payload_length(uint16_t len);
+
   /// Chunked TX: write first 64B to FIFO, enter TX, poll TX_FIFO_TH to refill
   /// remaining data in 15-byte chunks. Returns true if TX_DONE received.
   /// Handles packets up to MAX_RF_FRAME_SIZE bytes.

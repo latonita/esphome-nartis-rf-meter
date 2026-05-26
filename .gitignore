@@ -22,3 +22,8 @@ Desktop.ini
 
 # Secrets
 secrets.yaml
+
+.claude/
+decode/
+dump-spi/
+*.complex16s

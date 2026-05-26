@@ -531,11 +531,22 @@ size_t Cmt2300aHal::read_fifo(uint8_t *data, size_t max_len) {
   return max_len;
 }
 
+void Cmt2300aHal::set_tx_payload_length(uint16_t len) {
+  // PKT14 (0x45): bits[6:4] = PAYLOAD_LENG[10:8], other bits cleared (matches firmware).
+  // PKT15 (0x46): PAYLOAD_LENG[7:0].
+  write_reg(REG_PKT14, static_cast<uint8_t>((len >> 8) & 0x07) << 4);
+  write_reg(REG_PKT15, static_cast<uint8_t>(len & 0xFF));
+}
+
 bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   // Matching firmware cmt_tx_chunked_write (0x131B8): fill FIFO with first 64B, enter TX,
   // then poll TX_FIFO_TH via GPIO1 to refill remaining data in 15-byte chunks.
 
   if (!go_standby()) return false;
+
+  // Tell the packet engine how many bytes to transmit (fixed-length mode).
+  set_tx_payload_length(static_cast<uint16_t>(len));
+
   clear_tx_fifo();
   clear_interrupt_flags();
 
