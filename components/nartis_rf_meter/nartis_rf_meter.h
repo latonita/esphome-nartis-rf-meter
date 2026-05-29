@@ -56,9 +56,9 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void set_pin_fcsb(esphome::InternalGPIOPin *p) { pin_fcsb_ = p; }
   void set_pin_gpio1(esphome::InternalGPIOPin *p) { pin_gpio1_ = p; }
 
-  void set_meter_serial(const std::string &s) { meter_serial_ = s; }
+  /// Set the 12-digit meter serial (printed on the meter nameplate).
+  void set_meter_serial(const std::string &s);
   void set_ciu_serial(const std::string &s) { ciu_serial_ = s; }
-  void set_aes_key(const std::string &key);
 
   /* ---- Sensor registration ---- */
   void register_sensor(esphome::sensor::Sensor *s, const ObisCode &obis,

@@ -107,11 +107,19 @@ void NartisRfMeterComponent::loop() {
  * Configuration
  * ================================================================ */
 
-void NartisRfMeterComponent::set_aes_key(const std::string &key) {
+static constexpr uint8_t NARTIS_PAIRING_SALT[4] = {0xBD, 0x02, 0x9B, 0xBE};
+
+void NartisRfMeterComponent::set_meter_serial(const std::string &s) {
+  meter_serial_ = s;
+
+  // Derive the AES-128-GCM key:
+  //   key[0..11]  = ASCII bytes of the 12-digit meter serial
+  //   key[12..15] = Nartis-wide constant BD 02 9B BE
   memset(aes_key_, 0, AES_KEY_SIZE);
-  size_t copy_len = key.size();
-  if (copy_len > AES_KEY_SIZE) copy_len = AES_KEY_SIZE;
-  memcpy(aes_key_, key.c_str(), copy_len);
+  size_t copy_len = s.size();
+  if (copy_len > 12) copy_len = 12;
+  memcpy(aes_key_, s.c_str(), copy_len);
+  memcpy(aes_key_ + 12, NARTIS_PAIRING_SALT, 4);
 }
 
 void NartisRfMeterComponent::register_sensor(esphome::sensor::Sensor *s,

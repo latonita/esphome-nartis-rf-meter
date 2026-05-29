@@ -16,12 +16,23 @@ CONF_PIN_FCSB = "pin_fcsb"
 CONF_PIN_GPIO1 = "pin_gpio1"
 CONF_METER_SERIAL = "meter_serial"
 CONF_CIU_SERIAL = "ciu_serial"
-CONF_AES_KEY = "aes_key"
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
     "NartisRfMeterComponent", cg.PollingComponent
 )
+
+
+def validate_meter_serial(value):
+    """Meter serial is the 12-digit number printed on the meter nameplate."""
+    s = cv.string_strict(value)
+    if not s.isdigit() or len(s) != 12:
+        raise cv.Invalid(
+            f"meter_serial must be exactly 12 digits (as printed on the meter "
+            f"nameplate, e.g. '012345678901'); got {len(s)} characters '{s}'"
+        )
+    return s
+
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -34,13 +45,11 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_PIN_FCSB): pins.internal_gpio_output_pin_schema,
             # CMT2300A interrupt pin (input, active high)
             cv.Required(CONF_PIN_GPIO1): pins.internal_gpio_input_pin_schema,
-            # Meter serial number (from meter nameplate)
-            cv.Required(CONF_METER_SERIAL): cv.string_strict,
+            # Meter serial number (12 digits, printed on the meter nameplate).
+            cv.Required(CONF_METER_SERIAL): validate_meter_serial,
             # CIU serial — for replacing an existing CIU unit;
-            # if omitted, ESP32 MAC address is used (fresh pairing)
+            # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
-            # AES key — factory default from firmware, override only if meter has custom key
-            cv.Optional(CONF_AES_KEY, default="ZCZfuT666iRdgPNH"): cv.string_strict,
         }
     )
     .extend(cv.polling_component_schema("60s"))
@@ -63,10 +72,6 @@ async def to_code(config):
     gpio1 = await cg.gpio_pin_expression(config[CONF_PIN_GPIO1])
     cg.add(var.set_pin_gpio1(gpio1))
 
-    # Meter identification
     cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
     if config[CONF_CIU_SERIAL]:
         cg.add(var.set_ciu_serial(config[CONF_CIU_SERIAL]))
-
-    # AES key
-    cg.add(var.set_aes_key(config[CONF_AES_KEY]))

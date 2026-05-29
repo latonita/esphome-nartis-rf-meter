@@ -66,13 +66,12 @@ nartis_rf_meter:
   pin_csb: GPIO27
   pin_fcsb: GPIO26
   pin_gpio1: GPIO34
-  # Meter serial number (from meter nameplate, e.g., "12345678")
-  meter_serial: "YOUR_METER_SERIAL"
+  # Meter serial — the 12-digit number printed on the meter's nameplate
+  # (e.g. "021245003137"). 
+  meter_serial: "012345678901"
   # CIU serial — if replacing an existing CIU device, put its serial here;
   # if omitted, ESP32 MAC address is used (fresh pairing)
-  # ciu_serial: "YOUR_CIU_SERIAL"
-  # AES key — factory default, override only if meter has custom key
-  # aes_key: "ZCZfuT666iRdgPNH"
+  # ciu_serial: "MPCUA002RV634"
   # How often to poll the meter (default 60s)
   update_interval: 60s
 
