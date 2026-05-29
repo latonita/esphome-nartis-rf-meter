@@ -131,6 +131,19 @@ class Cmt2300aHal {
   /// Read raw RSSI code.
   uint8_t get_rssi_code();
 
+  /// Scan all NUM_CHANNELS channels, return the channel index with the lowest
+  /// trimmed-mean RSSI. Exact replica of CIU firmware rssi_channel_select (0x000134A4):
+  ///   per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,
+  ///                then 6 more samples with 2 ms between each,
+  ///                score = (sum_of_6 - max - min) / 4  (trimmed mean of middle 4).
+  /// Note: firmware never selects channel 0 (off-by-one bug: ch0's score is computed
+  /// but never compared). This impl preserves that behavior so the meter's expectations
+  /// match — channels 1, 2, 3 are eligible; the device returns 1 if none is better.
+  /// If out_score is non-null, must point to at least NUM_CHANNELS int8_t and is
+  /// filled with each channel's trimmed-mean dBm score.
+  /// Leaves chip in STBY with FIFO merge restored, parked on the chosen channel.
+  uint8_t scan_channels(int8_t *out_score = nullptr);
+
   /// Check FIFO flags register.
   uint8_t get_fifo_flags();
 

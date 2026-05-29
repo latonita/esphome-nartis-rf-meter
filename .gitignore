@@ -26,4 +26,7 @@ secrets.yaml
 .claude/
 decode/
 dump-spi/
+tools/
 *.complex16s
+IMPLEMENTATION_PLAN.md
+rf_captures_decoded/

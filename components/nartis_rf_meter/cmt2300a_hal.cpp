@@ -538,6 +538,73 @@ void Cmt2300aHal::set_tx_payload_length(uint16_t len) {
   write_reg(REG_PKT15, static_cast<uint8_t>(len & 0xFF));
 }
 
+uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
+  // Replica of firmware rssi_channel_select (0x000134A4).
+  // Per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,
+  //              6 more samples with 2 ms between each, track running max & min,
+  //              score = (sum_of_6 - max - min) / 4.
+  // Channel selection (firmware behavior, including the ch0-never-picked quirk):
+  //   - best_ch starts at 0
+  //   - ch1 always seeds best_ch=1, best_score=ch1_score
+  //   - ch2/ch3 replace only if strictly less than current best
+  //   - ch0's score is computed but never compared, so ch0 is unreachable
+
+  int8_t best_score = 127;
+  uint8_t best_ch = 0;
+
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+    go_standby();
+    set_frequency_channel(ch);
+    // Switch SYS11 to RSSI-valid mode (firmware FUN_00013daa: (SYS11 & 0xE0) | 0x01)
+    update_reg(REG_SYS11, 0x1F, 0x01);
+
+    spi_write_reg(REG_MODE_CTL, GO_RX);
+    if (!wait_for_state(STA_RX)) {
+      ESP_LOGW(TAG, "scan_channels: failed to enter RX on channel %u", ch);
+      if (out_score != nullptr) out_score[ch] = 127;
+      continue;
+    }
+
+    esphome::delayMicroseconds(RSSI_SCAN_SAMPLE_DELAY_US);
+    int8_t initial = get_rssi_dbm();
+    int8_t max_seen = initial;
+    int8_t min_seen = initial;
+    int sum = 0;
+
+    for (uint8_t i = 0; i < RSSI_SCAN_LOOP_SAMPLES; i++) {
+      esphome::delayMicroseconds(RSSI_SCAN_SAMPLE_DELAY_US);
+      int8_t s = get_rssi_dbm();
+      sum += s;
+      if (s > max_seen) max_seen = s;
+      if (s < min_seen) min_seen = s;
+    }
+
+    int trimmed = (sum - max_seen - min_seen) / (RSSI_SCAN_LOOP_SAMPLES - 2);
+    int8_t score = static_cast<int8_t>(trimmed);
+
+    if (out_score != nullptr) out_score[ch] = score;
+    ESP_LOGD(TAG, "scan_channels: ch%u score=%d dBm (min=%d max=%d)",
+             ch, score, min_seen, max_seen);
+
+    // Firmware comparison logic — preserve ch0-unreachable quirk verbatim.
+    if (ch == 1) {
+      best_ch = 1;
+      best_score = score;
+    } else if (ch > 1 && score < best_score) {
+      best_ch = ch;
+      best_score = score;
+    }
+  }
+
+  go_standby();
+  // Restore SYS11 to FIFO merge config: (SYS11 & 0xE0) | FIFO_MERGE_VALUE
+  update_reg(REG_SYS11, 0x1F, FIFO_MERGE_VALUE);
+  set_frequency_channel(best_ch);
+
+  ESP_LOGI(TAG, "scan_channels: best channel %u (%d dBm)", best_ch, best_score);
+  return best_ch;
+}
+
 bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   // Matching firmware cmt_tx_chunked_write (0x131B8): fill FIFO with first 64B, enter TX,
   // then poll TX_FIFO_TH via GPIO1 to refill remaining data in 15-byte chunks.
@@ -626,7 +693,9 @@ bool Cmt2300aHal::is_tx_done() {
 }
 
 int8_t Cmt2300aHal::get_rssi_dbm() {
-  return static_cast<int8_t>(spi_read_reg(REG_RSSI_DBM));
+  // REG 0x70 returns unsigned 0..255; dBm = regval - 128 (firmware FUN_00013f94).
+  int val = static_cast<int>(spi_read_reg(REG_RSSI_DBM)) - 128;
+  return static_cast<int8_t>(val);
 }
 
 uint8_t Cmt2300aHal::get_rssi_code() {

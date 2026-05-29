@@ -401,6 +401,16 @@ static constexpr uint32_t RESET_DELAY_MS = 20;
 static constexpr uint32_t STATE_POLL_TIMEOUT_MS = 10;
 static constexpr uint32_t STATE_POLL_INTERVAL_US = 100;
 
+/* ================================================================
+ * Channel-scan constants — match firmware rssi_channel_select (0x000134A4)
+ * 1 initial warmup sample + RSSI_SCAN_LOOP_SAMPLES scored samples per channel,
+ * RSSI_SCAN_SAMPLE_DELAY_US between each read.
+ * Score is the trimmed mean: (sum - max - min) / (LOOP_SAMPLES - 2).
+ * Firmware does NOT use any RSSI threshold — it only ranks channels.
+ * ================================================================ */
+static constexpr uint8_t  RSSI_SCAN_LOOP_SAMPLES = 6;
+static constexpr uint32_t RSSI_SCAN_SAMPLE_DELAY_US = 2000;
+
 /* Chunked RX queue capacity — enough for max 290-byte packet at 12 bytes/chunk */
 static constexpr size_t RX_QUEUE_CAPACITY = 30;
 
