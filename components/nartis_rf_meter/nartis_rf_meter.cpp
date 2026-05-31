@@ -902,15 +902,23 @@ void NartisRfMeterComponent::start_rx_() {
   hal_.reset_rx_fifo_full();   // FIFO_RESTORE + clear RX/TX
   hal_.clear_interrupt_flags();
 
+  // Decisive read-ordering test (explicit sequence, separate vars):
+  // read a known-good reg (Product ID, expect 0x66) and MODE_STA FIRST,
+  // then FIFO_FLAG twice, then INT_FLAG. If CMT2/STA read fine but FIFO/INT
+  // are 0xFF, it's register-specific (not a "first-read-after-write" glitch).
+  uint8_t r_cmt2  = hal_.read_reg(REG_CMT2);       // 0x01, expect 0x66
+  uint8_t r_sta   = hal_.read_reg(REG_MODE_STA);   // 0x61
+  uint8_t r_fifo1 = hal_.read_reg(REG_FIFO_FLAG);  // 0x6E
+  uint8_t r_fifo2 = hal_.read_reg(REG_FIFO_FLAG);  // 0x6E again
+  uint8_t r_int   = hal_.read_reg(REG_INT_FLAG);   // 0x6D
+  ESP_LOGW(TAG, "RXDIAG STBY: CMT2=0x%02X STA=0x%02X FIFO=0x%02X FIFO2=0x%02X INT=0x%02X",
+           r_cmt2, r_sta, r_fifo1, r_fifo2, r_int);
+
   // Enter RX mode: STBY → RFS → RX
   hal_.write_reg(REG_MODE_CTL, GO_RFS);
   hal_.wait_for_state(STA_RFS);
   hal_.write_reg(REG_MODE_CTL, GO_RX);
   hal_.wait_for_state(STA_RX);
-
-  // Re-clear once in RX state (some flags latch across the state transition).
-  hal_.reset_rx_fifo_full();
-  hal_.clear_interrupt_flags();
 
   ESP_LOGD(TAG, "RX started (polled FIFO drain, 4800 bps)");
 }
