@@ -891,9 +891,15 @@ void NartisRfMeterComponent::start_rx_() {
   rx_expected_len_ = 0;
   rx_active_ = true;
 
-  // Go to standby first
   hal_.go_standby();
-  hal_.clear_rx_fifo();
+
+  // CRITICAL: the preceding TX left the merged FIFO in TX direction with the
+  // 64-byte beacon still "occupying" it. Switch the merged FIFO back to RX
+  // direction FIRST, then fully reset it (clear + RESTORE pointers) — otherwise
+  // RX starts against a FIFO that already reads full/overflowed (FIFO_FLAG=0xFF)
+  // and we drain stale garbage. Order matters: direction → restore → clear.
+  hal_.prepare_rx_session();   // RX FIFO direction + SDIO input
+  hal_.reset_rx_fifo_full();   // FIFO_RESTORE + clear RX/TX
   hal_.clear_interrupt_flags();
 
   // Enter RX mode: STBY → RFS → RX
@@ -902,10 +908,9 @@ void NartisRfMeterComponent::start_rx_() {
   hal_.write_reg(REG_MODE_CTL, GO_RX);
   hal_.wait_for_state(STA_RX);
 
-  // Configure SDIO for FIFO reads + select RX FIFO direction.
-  // We poll REG_FIFO_FLAG via SPI in poll_rx_() — no GPIO ISR is used,
-  // matching how the CIU firmware itself does RX.
-  hal_.prepare_rx_session();
+  // Re-clear once in RX state (some flags latch across the state transition).
+  hal_.reset_rx_fifo_full();
+  hal_.clear_interrupt_flags();
 
   ESP_LOGD(TAG, "RX started (polled FIFO drain, 4800 bps)");
 }

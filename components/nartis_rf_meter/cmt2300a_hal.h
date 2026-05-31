@@ -86,6 +86,10 @@ class Cmt2300aHal {
   /// Clear RX FIFO only.
   void clear_rx_fifo();
 
+  /// Full merged-FIFO reset for RX: FIFO_RESTORE + clear RX/TX. Use after a
+  /// TX→RX direction switch so RX doesn't see leftover TX bytes.
+  void reset_rx_fifo_full();
+
   /// Write data to TX FIFO. Returns number of bytes written (limited by FIFO size).
   size_t write_fifo(const uint8_t *data, size_t len);
 

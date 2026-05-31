@@ -410,6 +410,13 @@ void Cmt2300aHal::clear_rx_fifo() {
   write_reg(REG_FIFO_CLR, FIFO_CLR_RX);
 }
 
+void Cmt2300aHal::reset_rx_fifo_full() {
+  // Full reset of the merged FIFO for RX: restore read/write pointers AND
+  // clear both halves. Required after a TX→RX direction switch so the RX
+  // side doesn't start against the bytes left over from the last TX.
+  write_reg(REG_FIFO_CLR, FIFO_RESTORE | FIFO_CLR_RX | FIFO_CLR_TX);
+}
+
 size_t Cmt2300aHal::write_fifo(const uint8_t *data, size_t len) {
   if (len > FIFO_SIZE_MERGED) {
     ESP_LOGW(TAG, "FIFO write truncated: %d > %d", (int) len, FIFO_SIZE_MERGED);
@@ -639,17 +646,21 @@ size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
   // incoming packet, both stay low and we drain nothing.
   size_t total = 0;
 
-  // --- DIAGNOSTIC: dump the raw chip flags so we can see what RX reports ---
-  {
-    uint8_t fifo_flag = spi_read_reg(REG_FIFO_FLAG);
-    uint8_t int_flag = spi_read_reg(REG_INT_FLAG);
-    uint8_t mode_sta = spi_read_reg(REG_MODE_STA);
-    static uint8_t diag_count = 0;
-    if (diag_count < 8) {
-      ESP_LOGW(TAG, "RXDIAG FIFO_FLAG(0x6E)=0x%02X INT_FLAG(0x6D)=0x%02X MODE_STA(0x%02X)=0x%02X",
-               fifo_flag, int_flag, REG_MODE_STA, mode_sta);
-      diag_count++;
+  // Overflow / invalid-state guard. A real packet never sets RX_OVF; if it's
+  // set (or the register reads all-ones), the FIFO is in a bad state — reset
+  // it and report "nothing received" rather than draining garbage.
+  uint8_t f0 = spi_read_reg(REG_FIFO_FLAG);
+  if (f0 == 0xFF || (f0 & FIFO_RX_OVF)) {
+    static uint8_t ovf_log = 0;
+    if (ovf_log < 4) {
+      ESP_LOGW(TAG, "RX FIFO overflow/invalid (FIFO_FLAG=0x%02X) — resetting", f0);
+      ovf_log++;
     }
+    reset_rx_fifo_full();
+    write_reg(REG_INT_CLR1, CLR1_TX_DONE_CLR | CLR1_SL_TMO_CLR | CLR1_RX_TMO_CLR);
+    write_reg(REG_INT_CLR2, CLR2_LBD_CLR | CLR2_PREAM_OK_CLR | CLR2_SYNC_OK_CLR |
+                            CLR2_NODE_OK_CLR | CLR2_CRC_OK_CLR | CLR2_PKT_DONE_CLR);
+    return 0;
   }
 
   // 1. Bulk: pull threshold-sized chunks the receiver has delivered so far.
