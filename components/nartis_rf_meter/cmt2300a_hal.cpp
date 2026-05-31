@@ -639,6 +639,19 @@ size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
   // incoming packet, both stay low and we drain nothing.
   size_t total = 0;
 
+  // --- DIAGNOSTIC: dump the raw chip flags so we can see what RX reports ---
+  {
+    uint8_t fifo_flag = spi_read_reg(REG_FIFO_FLAG);
+    uint8_t int_flag = spi_read_reg(REG_INT_FLAG);
+    uint8_t mode_sta = spi_read_reg(REG_MODE_STA);
+    static uint8_t diag_count = 0;
+    if (diag_count < 8) {
+      ESP_LOGW(TAG, "RXDIAG FIFO_FLAG(0x6E)=0x%02X INT_FLAG(0x6D)=0x%02X MODE_STA(0x%02X)=0x%02X",
+               fifo_flag, int_flag, REG_MODE_STA, mode_sta);
+      diag_count++;
+    }
+  }
+
   // 1. Bulk: pull threshold-sized chunks the receiver has delivered so far.
   //    Required for packets larger than the 64-byte FIFO (drained mid-RX).
   while (total + FIFO_TH_VALUE <= buf_size &&
