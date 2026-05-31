@@ -9,13 +9,18 @@
  *   SCLK  — serial clock
  *   CSB   — chip select for register access (active low)
  *   FCSB  — chip select for FIFO access (active low)
- *   GPIO1 — interrupt output from CMT2300A (active high)
+ *   GPIO1 — radio status output (unused: we poll via SPI, matching the
+ *           original CIU firmware which is also fully polled)
  *
  * FIFO reception:
- *   For packets > 64 bytes (FIFO size), the HAL uses a GPIO interrupt
- *   on the RX_FIFO_TH signal to read 12-byte chunks directly in the ISR,
- *   pushing them to a FreeRTOS queue. The main loop drains the queue
- *   into an accumulation buffer. RX_FIFO_TH is auto-clearing (AN143).
+ *   Polling-based. The component's main loop calls poll_rx_drain() each
+ *   iteration; it reads REG_FIFO_FLAG via SPI and drains whatever is
+ *   available — a full FIFO_TH_VALUE-byte chunk in one burst when the
+ *   RX_FIFO_TH flag is set, or byte-by-byte for the packet tail.
+ *
+ *   At the meter's 4800 bps on-air rate (~600 B/s), bytes trickle in
+ *   one every ~1.7 ms, so the ESPHome loop() rate is more than fast
+ *   enough to keep up. No GPIO interrupt is required.
  */
 
 #pragma once
@@ -24,20 +29,9 @@
 #include <cstddef>
 #include "cmt2300a_defs.h"
 
-#include "esphome/core/gpio.h"
-
-// ESP-IDF GPIO for direct pin control (bit-bang SPI requires fast GPIO access)
-#include <driver/gpio.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
+#include "esphome/core/gpio.h"  // gpio::Flags, InternalGPIOPin
 
 namespace esphome::nartis_rf_meter {
-
-/// Chunk of FIFO data read in ISR context
-struct FifoChunk {
-  uint8_t data[FIFO_TH_VALUE];  // 12 bytes
-  uint8_t len;                   // actual bytes read
-};
 
 class Cmt2300aHal {
  public:
@@ -150,24 +144,27 @@ class Cmt2300aHal {
   /// Read GPIO1 pin state (interrupt line).
   bool read_gpio1();
 
-  /* ---- Chunked RX (for packets > 64 bytes) ---- */
-
-  /// Set INT1 source register (e.g., INT_SEL_RX_FIFO_TH or INT_SEL_PKT_DONE).
+  /// Set INT1 source field of REG_INT1_CTL. Used internally by the
+  /// TX-chunked path; harmless on the RX path since we no longer read
+  /// the GPIO1 line as an interrupt.
   void set_int1_source(uint8_t source);
 
-  /// Prepare SDIO pin for FIFO reading (set input once before RX session).
-  /// Must be called before enabling RX interrupt.
-  void prepare_fifo_read();
+  /* ---- Chunked RX (polling-based, no ISR) ---- */
 
-  /// Enable GPIO1 interrupt for chunked RX (ISR reads FIFO on RX_FIFO_TH).
-  void enable_rx_interrupt();
+  /// Prepare the SDIO pin + FIFO control for an RX session. Call once
+  /// after entering RX mode, before the first poll_rx_drain() call.
+  void prepare_rx_session();
 
-  /// Disable GPIO1 interrupt.
-  void disable_rx_interrupt();
-
-  /// Drain all available chunks from the RX queue into buffer.
-  /// Returns total bytes copied. Non-blocking.
-  size_t drain_rx_queue(uint8_t *buf, size_t buf_size);
+  /// Non-blocking poll: read REG_FIFO_FLAG via SPI and drain whatever
+  /// bytes are currently sitting in the RX FIFO into `buf`.
+  ///
+  /// Burst-reads a full FIFO_TH_VALUE chunk when the RX_FIFO_TH flag is
+  /// set, otherwise reads byte-by-byte (typical for the packet tail).
+  /// Stops at `buf_size` even if more bytes are pending.
+  ///
+  /// Returns the number of bytes appended to `buf` this call (0 if the
+  /// FIFO is empty).
+  size_t poll_rx_drain(uint8_t *buf, size_t buf_size);
 
   /* ---- Low-Level Register Access ---- */
 
@@ -192,9 +189,6 @@ class Cmt2300aHal {
   /// Receive 8 bits from SDIO (MSB first), SDIO configured as input.
   uint8_t spi_recv_byte();
 
-  /// ISR-safe receive: no gpio_set_direction, SDIO must already be input.
-  static uint8_t IRAM_ATTR spi_recv_byte_isr(uint8_t pin_sclk, uint8_t pin_sdio);
-
   /// Register write: CSB low, send addr|WRITE, send data, CSB high.
   void spi_write_reg(uint8_t addr, uint8_t val);
 
@@ -205,26 +199,20 @@ class Cmt2300aHal {
   void spi_write_fifo(const uint8_t *data, size_t len);
 
   /// FIFO read: FCSB low, read bytes, FCSB high.
+  /// Assumes SDIO has already been set to input (prepare_rx_session()).
   void spi_read_fifo(uint8_t *data, size_t len);
-
-  /// ISR-safe FIFO read: SDIO must already be input. No gpio_set_direction calls.
-  static void IRAM_ATTR spi_read_fifo_isr(uint8_t *data, size_t len,
-                                           uint8_t pin_fcsb, uint8_t pin_sclk, uint8_t pin_sdio);
 
   /// Set SDIO pin direction.
   void sdio_set_output();
   void sdio_set_input();
 
-  /// GPIO helpers.
-  void pin_high(uint8_t pin);
-  void pin_low(uint8_t pin);
-  bool pin_read(uint8_t pin);
+  /// GPIO helpers (operate on the fast ISR-safe pin handles).
+  static void pin_high(esphome::ISRInternalGPIOPin &pin) { pin.digital_write(true); }
+  static void pin_low(esphome::ISRInternalGPIOPin &pin) { pin.digital_write(false); }
+  static bool pin_read(esphome::ISRInternalGPIOPin &pin) { return pin.digital_read(); }
 
   /// Tiny delay for SPI timing (~0.5-1 MHz clock).
   void spi_delay();
-
-  /// ISR-safe delay (~1 us busy wait).
-  static void IRAM_ATTR spi_delay_isr();
 
   /// Write the complete 96-byte register configuration.
   void write_full_config();
@@ -232,24 +220,21 @@ class Cmt2300aHal {
   /// Apply runtime overrides (FIFO merge, FIFO threshold, GPIO/interrupt config).
   void apply_runtime_overrides();
 
-  /// GPIO1 ISR handler — reads FIFO_TH_VALUE bytes and pushes to rx_queue_.
-  static void IRAM_ATTR gpio1_isr_handler(Cmt2300aHal *self);
-
   /* ---- Pin assignments ---- */
-  // Raw pin numbers extracted from InternalGPIOPin for fast bit-bang SPI access
-  uint8_t pin_sdio_{0};
-  uint8_t pin_sclk_{0};
-  uint8_t pin_csb_{0};
-  uint8_t pin_fcsb_{0};
-  uint8_t pin_gpio1_{0};
-  // InternalGPIOPin pointer for GPIO1 interrupt attach/detach
+  // Configured GPIO pin objects (used for setup() + pin_mode at init).
+  esphome::InternalGPIOPin *sdio_pin_{nullptr};
+  esphome::InternalGPIOPin *sclk_pin_{nullptr};
+  esphome::InternalGPIOPin *csb_pin_{nullptr};
+  esphome::InternalGPIOPin *fcsb_pin_{nullptr};
   esphome::InternalGPIOPin *gpio1_pin_{nullptr};
+  // Fast non-virtual handles for the bit-bang inner loop (via pin->to_isr()).
+  esphome::ISRInternalGPIOPin sdio_;
+  esphome::ISRInternalGPIOPin sclk_;
+  esphome::ISRInternalGPIOPin csb_;
+  esphome::ISRInternalGPIOPin fcsb_;
+  esphome::ISRInternalGPIOPin gpio1_;
 
   bool initialized_{false};
-
-  /* ---- Chunked RX state ---- */
-  QueueHandle_t rx_queue_{nullptr};
-  bool isr_installed_{false};
 };
 
 }  // namespace esphome::nartis_rf_meter

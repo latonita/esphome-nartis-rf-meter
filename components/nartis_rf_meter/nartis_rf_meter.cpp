@@ -10,7 +10,6 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/time.h"
 
-#include <esp_mac.h>
 #include <cstring>
 #include <ctime>
 
@@ -579,7 +578,8 @@ int NartisRfMeterComponent::receive_frame_(uint8_t *payload_out, size_t max,
 
 void NartisRfMeterComponent::derive_rf_address_() {
   uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  // ESPHome's get_mac_address_raw() works on ESP32, ESP8266, RP2040, etc.
+  esphome::get_mac_address_raw(mac);
   uint32_t seed = (static_cast<uint32_t>(mac[2]) << 24) |
                   (static_cast<uint32_t>(mac[3]) << 16) |
                   (static_cast<uint32_t>(mac[4]) << 8) |
@@ -690,25 +690,18 @@ void NartisRfMeterComponent::start_rx_() {
   hal_.clear_rx_fifo();
   hal_.clear_interrupt_flags();
 
-  // Set INT1 source to RX_FIFO_TH (auto-clearing, per AN143)
-  hal_.set_int1_source(INT_SEL_RX_FIFO_TH);
-
   // Enter RX mode: STBY → RFS → RX
-  // We do manual state transitions instead of go_rx() to control
-  // the SDIO direction setup and ISR arming order.
   hal_.write_reg(REG_MODE_CTL, GO_RFS);
   hal_.wait_for_state(STA_RFS);
   hal_.write_reg(REG_MODE_CTL, GO_RX);
   hal_.wait_for_state(STA_RX);
 
-  // Now that we're in RX and won't do any more SPI register writes,
-  // set SDIO to input for the ISR (avoids gpio_set_direction spinlock in ISR)
-  hal_.prepare_fifo_read();
+  // Configure SDIO for FIFO reads + select RX FIFO direction.
+  // We poll REG_FIFO_FLAG via SPI in poll_rx_() — no GPIO ISR is used,
+  // matching how the CIU firmware itself does RX.
+  hal_.prepare_rx_session();
 
-  // Arm the GPIO interrupt (must be after prepare_fifo_read and after RX mode entered)
-  hal_.enable_rx_interrupt();
-
-  ESP_LOGD(TAG, "RX started (chunked mode, FIFO_TH interrupt)");
+  ESP_LOGD(TAG, "RX started (polled FIFO drain, 4800 bps)");
 }
 
 NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
@@ -716,8 +709,8 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
   uint32_t elapsed = esphome::millis() - state_entered_ms_;
 
-  // Drain any chunks the ISR has queued
-  size_t drained = hal_.drain_rx_queue(rx_accum_buf_ + rx_accum_len_,
+  // Drain whatever the chip has in its FIFO right now (SPI poll).
+  size_t drained = hal_.poll_rx_drain(rx_accum_buf_ + rx_accum_len_,
                                        MAX_RF_FRAME_SIZE - rx_accum_len_);
   if (drained > 0) {
     ESP_LOGV(TAG, "RX drained +%d bytes (total %d)", (int) drained, (int) (rx_accum_len_ + drained));
@@ -768,9 +761,6 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
 void NartisRfMeterComponent::finish_rx_() {
   if (!rx_active_) return;
-
-  // Disable ISR first
-  hal_.disable_rx_interrupt();
 
   // Stop reception
   hal_.go_standby();

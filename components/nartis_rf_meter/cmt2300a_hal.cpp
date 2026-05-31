@@ -8,49 +8,25 @@
 #include "cmt2300a_hal.h"
 
 #include "esphome/core/log.h"
-#include "esphome/core/hal.h"
-#include <esp_rom_sys.h>  // esp_rom_delay_us (ISR-safe)
+#include "esphome/core/hal.h"  // esphome::delay / delayMicroseconds
 
 namespace esphome::nartis_rf_meter {
 
 static const char *const TAG = "cmt2300a_hal";
 
 /* ================================================================
- * Destructor — cleanup FreeRTOS queue
+ * Destructor — no resources to clean up (polling-based RX, no ISR/queue)
  * ================================================================ */
 
-Cmt2300aHal::~Cmt2300aHal() {
-  if (isr_installed_ && gpio1_pin_ != nullptr) {
-    gpio1_pin_->detach_interrupt();
-  }
-  if (rx_queue_ != nullptr) {
-    vQueueDelete(rx_queue_);
-  }
-}
+Cmt2300aHal::~Cmt2300aHal() = default;
 
 /* ================================================================
- * Pin helpers — ESP32 GPIO direct register access for speed
+ * Pin helpers — ESPHome ISRInternalGPIOPin (fast, non-virtual, portable)
+ * pin_high/pin_low/pin_read are inline static in the header.
  * ================================================================ */
 
-void Cmt2300aHal::pin_high(uint8_t pin) {
-  gpio_set_level(static_cast<gpio_num_t>(pin), 1);
-}
-
-void Cmt2300aHal::pin_low(uint8_t pin) {
-  gpio_set_level(static_cast<gpio_num_t>(pin), 0);
-}
-
-bool Cmt2300aHal::pin_read(uint8_t pin) {
-  return gpio_get_level(static_cast<gpio_num_t>(pin)) != 0;
-}
-
-void Cmt2300aHal::sdio_set_output() {
-  gpio_set_direction(static_cast<gpio_num_t>(pin_sdio_), GPIO_MODE_OUTPUT);
-}
-
-void Cmt2300aHal::sdio_set_input() {
-  gpio_set_direction(static_cast<gpio_num_t>(pin_sdio_), GPIO_MODE_INPUT);
-}
+void Cmt2300aHal::sdio_set_output() { sdio_.pin_mode(gpio::FLAG_OUTPUT); }
+void Cmt2300aHal::sdio_set_input()  { sdio_.pin_mode(gpio::FLAG_INPUT); }
 
 void Cmt2300aHal::spi_delay() {
   // ~0.5 us delay for ~1 MHz SPI clock
@@ -70,48 +46,48 @@ void Cmt2300aHal::spi_delay() {
 
 void Cmt2300aHal::spi_send_byte(uint8_t byte) {
   for (int i = 7; i >= 0; i--) {
-    pin_low(pin_sclk_);
+    pin_low(sclk_);
     if (byte & (1 << i)) {
-      pin_high(pin_sdio_);
+      pin_high(sdio_);
     } else {
-      pin_low(pin_sdio_);
+      pin_low(sdio_);
     }
     spi_delay();
-    pin_high(pin_sclk_);
+    pin_high(sclk_);
     spi_delay();
   }
-  pin_low(pin_sclk_);
+  pin_low(sclk_);
 }
 
 uint8_t Cmt2300aHal::spi_recv_byte() {
   uint8_t byte = 0;
   for (int i = 7; i >= 0; i--) {
-    pin_low(pin_sclk_);
+    pin_low(sclk_);
     spi_delay();
-    pin_high(pin_sclk_);
+    pin_high(sclk_);
     spi_delay();
-    if (pin_read(pin_sdio_)) {
+    if (pin_read(sdio_)) {
       byte |= (1 << i);
     }
   }
-  pin_low(pin_sclk_);
+  pin_low(sclk_);
   return byte;
 }
 
 void Cmt2300aHal::spi_write_reg(uint8_t addr, uint8_t val) {
-  pin_low(pin_csb_);
+  pin_low(csb_);
   spi_delay();
 
   sdio_set_output();
   spi_send_byte(addr & 0x7F);  // Bit 7 = 0 for write
   spi_send_byte(val);
 
-  pin_high(pin_csb_);
+  pin_high(csb_);
   spi_delay();
 }
 
 uint8_t Cmt2300aHal::spi_read_reg(uint8_t addr) {
-  pin_low(pin_csb_);
+  pin_low(csb_);
   spi_delay();
 
   sdio_set_output();
@@ -121,7 +97,7 @@ uint8_t Cmt2300aHal::spi_read_reg(uint8_t addr) {
   sdio_set_input();
   uint8_t val = spi_recv_byte();
 
-  pin_high(pin_csb_);
+  pin_high(csb_);
   spi_delay();
   return val;
 }
@@ -130,10 +106,10 @@ void Cmt2300aHal::spi_write_fifo(const uint8_t *data, size_t len) {
   sdio_set_output();
 
   for (size_t i = 0; i < len; i++) {
-    pin_low(pin_fcsb_);
+    pin_low(fcsb_);
     spi_delay();
     spi_send_byte(data[i]);
-    pin_high(pin_fcsb_);
+    pin_high(fcsb_);
     // Datasheet: wait >= 2 us after last SCLK falling edge before FCSB high
     // (already satisfied by spi_send_byte ending with SCLK low)
     spi_delay();
@@ -145,81 +121,15 @@ void Cmt2300aHal::spi_write_fifo(const uint8_t *data, size_t len) {
 
 void Cmt2300aHal::spi_read_fifo(uint8_t *data, size_t len) {
   for (size_t i = 0; i < len; i++) {
-    pin_low(pin_fcsb_);
+    pin_low(fcsb_);
     spi_delay();
     sdio_set_input();
     data[i] = spi_recv_byte();
-    pin_high(pin_fcsb_);
+    pin_high(fcsb_);
     spi_delay();
     spi_delay();
     spi_delay();
     spi_delay();
-  }
-}
-
-/* ================================================================
- * ISR-safe SPI primitives
- *
- * These use only gpio_set_level / gpio_get_level / esp_rom_delay_us
- * which are all safe to call from IRAM ISR context.
- * SDIO must already be configured as input before calling these.
- * ================================================================ */
-
-void IRAM_ATTR Cmt2300aHal::spi_delay_isr() {
-  esp_rom_delay_us(1);
-}
-
-uint8_t IRAM_ATTR Cmt2300aHal::spi_recv_byte_isr(uint8_t pin_sclk, uint8_t pin_sdio) {
-  uint8_t byte = 0;
-  auto sclk = static_cast<gpio_num_t>(pin_sclk);
-  auto sdio = static_cast<gpio_num_t>(pin_sdio);
-  for (int i = 7; i >= 0; i--) {
-    gpio_set_level(sclk, 0);
-    spi_delay_isr();
-    gpio_set_level(sclk, 1);
-    spi_delay_isr();
-    if (gpio_get_level(sdio)) {
-      byte |= (1 << i);
-    }
-  }
-  gpio_set_level(sclk, 0);
-  return byte;
-}
-
-void IRAM_ATTR Cmt2300aHal::spi_read_fifo_isr(uint8_t *data, size_t len,
-                                                uint8_t pin_fcsb, uint8_t pin_sclk, uint8_t pin_sdio) {
-  auto fcsb = static_cast<gpio_num_t>(pin_fcsb);
-  for (size_t i = 0; i < len; i++) {
-    gpio_set_level(fcsb, 0);
-    spi_delay_isr();
-    data[i] = spi_recv_byte_isr(pin_sclk, pin_sdio);
-    gpio_set_level(fcsb, 1);
-    spi_delay_isr();
-    spi_delay_isr();
-    spi_delay_isr();
-    spi_delay_isr();
-  }
-}
-
-/* ================================================================
- * GPIO1 ISR — triggered by RX_FIFO_TH (auto-clearing per AN143)
- *
- * Reads FIFO_TH_VALUE (12) bytes from FIFO and pushes to queue.
- * ~300 us execution time at 1 MHz bit-bang SPI.
- * ================================================================ */
-
-void IRAM_ATTR Cmt2300aHal::gpio1_isr_handler(Cmt2300aHal *self) {
-
-  FifoChunk chunk;
-  chunk.len = FIFO_TH_VALUE;
-  spi_read_fifo_isr(chunk.data, chunk.len,
-                     self->pin_fcsb_, self->pin_sclk_, self->pin_sdio_);
-
-  BaseType_t higher_prio_woken = pdFALSE;
-  xQueueSendFromISR(self->rx_queue_, &chunk, &higher_prio_woken);
-
-  if (higher_prio_woken) {
-    portYIELD_FROM_ISR();
   }
 }
 
@@ -254,14 +164,18 @@ void Cmt2300aHal::update_reg(uint8_t addr, uint8_t mask, uint8_t val) {
 void Cmt2300aHal::set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIOPin *sclk,
                            esphome::InternalGPIOPin *csb, esphome::InternalGPIOPin *fcsb,
                            esphome::InternalGPIOPin *gpio1) {
-  // Extract raw pin numbers for fast bit-bang SPI (direct ESP-IDF GPIO calls)
-  pin_sdio_ = sdio->get_pin();
-  pin_sclk_ = sclk->get_pin();
-  pin_csb_ = csb->get_pin();
-  pin_fcsb_ = fcsb->get_pin();
-  pin_gpio1_ = gpio1->get_pin();
-  // Keep InternalGPIOPin pointer for GPIO1 interrupt management
+  // Keep the pin objects for setup()/pin_mode at init, and snapshot fast
+  // ISR-safe handles for the bit-bang inner loop (non-virtual access).
+  sdio_pin_ = sdio;
+  sclk_pin_ = sclk;
+  csb_pin_ = csb;
+  fcsb_pin_ = fcsb;
   gpio1_pin_ = gpio1;
+  sdio_ = sdio->to_isr();
+  sclk_ = sclk->to_isr();
+  csb_ = csb->to_isr();
+  fcsb_ = fcsb->to_isr();
+  gpio1_ = gpio1->to_isr();
 }
 
 /* ================================================================
@@ -271,27 +185,23 @@ void Cmt2300aHal::set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIO
 bool Cmt2300aHal::init() {
   ESP_LOGI(TAG, "Initializing CMT2300A...");
 
-  // Configure GPIO pins (ESP-IDF direct GPIO for bit-bang SPI)
-  gpio_config_t out_conf = {};
-  out_conf.pin_bit_mask = (1ULL << pin_sclk_) | (1ULL << pin_csb_) | (1ULL << pin_fcsb_) | (1ULL << pin_sdio_);
-  out_conf.mode = GPIO_MODE_OUTPUT;
-  out_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-  out_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  out_conf.intr_type = GPIO_INTR_DISABLE;
-  gpio_config(&out_conf);
-
-  gpio_config_t in_conf = {};
-  in_conf.pin_bit_mask = (1ULL << pin_gpio1_);
-  in_conf.mode = GPIO_MODE_INPUT;
-  in_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-  in_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  in_conf.intr_type = GPIO_INTR_DISABLE;
-  gpio_config(&in_conf);
+  // Register + configure each pin through its GPIOPin object (applies the
+  // platform-correct setup), then set the directions we need.
+  sclk_pin_->setup();
+  csb_pin_->setup();
+  fcsb_pin_->setup();
+  sdio_pin_->setup();
+  gpio1_pin_->setup();
+  sclk_.pin_mode(gpio::FLAG_OUTPUT);
+  csb_.pin_mode(gpio::FLAG_OUTPUT);
+  fcsb_.pin_mode(gpio::FLAG_OUTPUT);
+  sdio_.pin_mode(gpio::FLAG_OUTPUT);
+  gpio1_.pin_mode(gpio::FLAG_INPUT);
 
   // Idle state: both CS lines high, clock low
-  pin_high(pin_csb_);
-  pin_high(pin_fcsb_);
-  pin_low(pin_sclk_);
+  pin_high(csb_);
+  pin_high(fcsb_);
+  pin_low(sclk_);
 
   // Soft reset
   spi_write_reg(REG_SOFT_RST, SOFT_RST_VALUE);
@@ -329,20 +239,6 @@ bool Cmt2300aHal::init() {
 
   // Clear FIFO
   clear_fifo();
-
-  // Create FreeRTOS queue for chunked RX
-  rx_queue_ = xQueueCreate(RX_QUEUE_CAPACITY, sizeof(FifoChunk));
-  if (rx_queue_ == nullptr) {
-    ESP_LOGE(TAG, "Failed to create RX queue");
-    return false;
-  }
-
-  // Attach GPIO1 interrupt handler (disabled until enable_rx_interrupt)
-  if (!isr_installed_ && gpio1_pin_ != nullptr) {
-    gpio1_pin_->attach_interrupt(gpio1_isr_handler, this, esphome::gpio::INTERRUPT_RISING_EDGE);
-    gpio_intr_disable(static_cast<gpio_num_t>(pin_gpio1_));
-    isr_installed_ = true;
-  }
 
   initialized_ = true;
   ESP_LOGI(TAG, "CMT2300A initialized successfully");
@@ -650,7 +546,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
     }
 
     // If more data to write, check if FIFO needs refill via GPIO1 (TX_FIFO_TH)
-    if (written < len && pin_read(pin_gpio1_)) {
+    if (written < len && pin_read(gpio1_)) {
       size_t remaining = len - written;
       size_t chunk = (remaining > TX_REFILL_CHUNK) ? TX_REFILL_CHUNK : remaining;
       spi_write_fifo(data + written, chunk);
@@ -707,7 +603,7 @@ uint8_t Cmt2300aHal::get_fifo_flags() {
 }
 
 bool Cmt2300aHal::read_gpio1() {
-  return pin_read(pin_gpio1_);
+  return pin_read(gpio1_);
 }
 
 /* ================================================================
@@ -715,47 +611,53 @@ bool Cmt2300aHal::read_gpio1() {
  * ================================================================ */
 
 void Cmt2300aHal::set_int1_source(uint8_t source) {
-  // Preserve INT_POLAR bit, update INT1_SEL field
+  // Preserve INT_POLAR bit, update INT1_SEL field.
+  // Kept for the TX-chunked path; the RX path no longer relies on the
+  // chip's GPIO1 interrupt line — we poll REG_FIFO_FLAG via SPI instead.
   update_reg(REG_INT1_CTL, MASK_INT1_SEL, source & MASK_INT1_SEL);
 }
 
-void Cmt2300aHal::prepare_fifo_read() {
-  // Set SDIO pin to input once before the RX session.
-  // This avoids calling gpio_set_direction (which takes a spinlock)
-  // inside the ISR.
+void Cmt2300aHal::prepare_rx_session() {
+  // SDIO becomes the read line for the duration of the RX session.
+  // Setting it once up-front avoids per-byte pinMode toggles.
   sdio_set_input();
 
-  // Configure SPI_FIFO_RD_WR_SEL = 0 (SPI reads FIFO) and
-  // FIFO_RX_TX_SEL = 0 (merged FIFO used as RX)
+  // SPI_FIFO_RD_WR_SEL = 0 (SPI reads FIFO) and
+  // FIFO_RX_TX_SEL    = 0 (merged FIFO acts as RX FIFO).
   update_reg(REG_FIFO_CTL, MASK_SPI_FIFO_RD_WR_SEL | MASK_FIFO_RX_TX_SEL, 0x00);
 }
 
-void Cmt2300aHal::enable_rx_interrupt() {
-  if (!isr_installed_) return;
-
-  // Flush any stale chunks from previous RX session
-  FifoChunk discard;
-  while (xQueueReceive(rx_queue_, &discard, 0) == pdTRUE) {}
-
-  // Enable GPIO1 interrupt (type already set by attach_interrupt in init)
-  gpio_intr_enable(static_cast<gpio_num_t>(pin_gpio1_));
-}
-
-void Cmt2300aHal::disable_rx_interrupt() {
-  gpio_intr_disable(static_cast<gpio_num_t>(pin_gpio1_));
-}
-
-size_t Cmt2300aHal::drain_rx_queue(uint8_t *buf, size_t buf_size) {
-  FifoChunk chunk;
+size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
+  // Gated by the RX packet engine — NOT by the raw "FIFO not empty" flag.
+  //
+  // FIFO_RX_NMTY is unreliable as a drain gate here: right after a TX→RX
+  // switch it can read back stuck/garbage on an empty FIFO, which would
+  // drain the whole buffer of zeros. Instead we mirror the original ISR
+  // design (and the CIU firmware): the chip asserts FIFO_RX_TH only when
+  // >= FIFO_TH_VALUE real bytes have been written by the receiver, and
+  // asserts PKT_OK (INT_FLAG) when a complete packet has arrived. With no
+  // incoming packet, both stay low and we drain nothing.
   size_t total = 0;
-  while (xQueueReceive(rx_queue_, &chunk, 0) == pdTRUE) {
-    size_t copy_len = chunk.len;
-    if (total + copy_len > buf_size) {
-      copy_len = buf_size - total;
+
+  // 1. Bulk: pull threshold-sized chunks the receiver has delivered so far.
+  //    Required for packets larger than the 64-byte FIFO (drained mid-RX).
+  while (total + FIFO_TH_VALUE <= buf_size &&
+         (spi_read_reg(REG_FIFO_FLAG) & FIFO_RX_TH)) {
+    spi_read_fifo(buf + total, FIFO_TH_VALUE);
+    total += FIFO_TH_VALUE;
+  }
+
+  // 2. Tail: once the packet is complete, drain the remaining (< threshold)
+  //    bytes. Bounded by one FIFO depth so a stuck not-empty flag can never
+  //    run away.
+  if (spi_read_reg(REG_INT_FLAG) & FLAG_PKT_OK) {
+    for (size_t guard = 0; guard < FIFO_SIZE_MERGED && total < buf_size; guard++) {
+      if (!(spi_read_reg(REG_FIFO_FLAG) & FIFO_RX_NMTY)) {
+        break;  // FIFO drained
+      }
+      spi_read_fifo(buf + total, 1);
+      total += 1;
     }
-    memcpy(buf + total, chunk.data, copy_len);
-    total += copy_len;
-    if (total >= buf_size) break;
   }
   return total;
 }

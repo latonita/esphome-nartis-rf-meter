@@ -15,7 +15,19 @@
 #include <algorithm>
 
 #include "esphome/core/log.h"
-#include <mbedtls/ccm.h>
+#include "esphome/core/defines.h"
+
+#ifdef USE_ESP32
+  #include <mbedtls/ccm.h>
+#elif defined(USE_ESP8266)
+  // ESP8266 Arduino core ships with BearSSL — use it for AES-128-CCM here.
+  // Note: per FRAME_HEADER_SPEC.md §8 the firmware's actual cipher is
+  // AES-128-GCM (not CCM) with AAD = [01 29 L 00]. The current component
+  // implements CCM-without-AAD, which is preserved here for parity with
+  // the ESP32 build. A GCM-with-AAD migration is a separate TODO.
+  #include <bearssl/bearssl_block.h>
+  #include <bearssl/bearssl_aead.h>
+#endif
 
 namespace esphome::nartis_rf_meter {
 
@@ -178,6 +190,7 @@ size_t RfDataLayer::aes_ccm_encrypt(uint8_t *data, size_t data_len, size_t buf_m
   uint8_t nonce[AES_NONCE_SIZE];
   build_nonce(nonce, address_, counter);
 
+#ifdef USE_ESP32
   mbedtls_ccm_context ctx;
   mbedtls_ccm_init(&ctx);
   int ret = mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, aes_key_, 128);
@@ -196,6 +209,25 @@ size_t RfDataLayer::aes_ccm_encrypt(uint8_t *data, size_t data_len, size_t buf_m
   }
   memcpy(data + data_len, tag, AES_TAG_SIZE);
   return data_len + AES_TAG_SIZE;
+#elif defined(USE_ESP8266)
+  // BearSSL CCM (AAD-free, 12-byte tag)
+  br_aes_big_ctrcbc_keys aes;
+  br_aes_big_ctrcbc_init(&aes, aes_key_, AES_KEY_SIZE);
+  br_ccm_context cctx;
+  br_ccm_init(&cctx, &aes.vtable);
+  br_ccm_reset(&cctx, nonce, AES_NONCE_SIZE, /*aad_len=*/0, data_len, AES_TAG_SIZE);
+  br_ccm_aad_inject(&cctx, nullptr, 0);
+  br_ccm_flip(&cctx);
+  br_ccm_run(&cctx, /*encrypt=*/1, data, data_len);
+  uint8_t tag[AES_TAG_SIZE];
+  br_ccm_get_tag(&cctx, tag);
+  memcpy(data + data_len, tag, AES_TAG_SIZE);
+  return data_len + AES_TAG_SIZE;
+#else
+  (void) nonce;
+  ESP_LOGE(TAG, "aes_ccm_encrypt: no AES backend available on this platform.");
+  return 0;
+#endif
 }
 
 int RfDataLayer::aes_ccm_decrypt(uint8_t *data, size_t data_len, uint32_t counter) {
@@ -210,6 +242,7 @@ int RfDataLayer::aes_ccm_decrypt(uint8_t *data, size_t data_len, uint32_t counte
   // the address embedded in the inner frame header.
   build_nonce(nonce, meter_address_set_ ? meter_address_ : address_, counter);
 
+#ifdef USE_ESP32
   mbedtls_ccm_context ctx;
   mbedtls_ccm_init(&ctx);
   int ret = mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, aes_key_, 128);
@@ -227,6 +260,27 @@ int RfDataLayer::aes_ccm_decrypt(uint8_t *data, size_t data_len, uint32_t counte
     return -1;
   }
   return static_cast<int>(ct_len);
+#elif defined(USE_ESP8266)
+  // BearSSL CCM decrypt (AAD-free, 12-byte tag)
+  br_aes_big_ctrcbc_keys aes;
+  br_aes_big_ctrcbc_init(&aes, aes_key_, AES_KEY_SIZE);
+  br_ccm_context cctx;
+  br_ccm_init(&cctx, &aes.vtable);
+  br_ccm_reset(&cctx, nonce, AES_NONCE_SIZE, /*aad_len=*/0, ct_len, AES_TAG_SIZE);
+  br_ccm_aad_inject(&cctx, nullptr, 0);
+  br_ccm_flip(&cctx);
+  br_ccm_run(&cctx, /*encrypt=*/0, data, ct_len);
+  if (br_ccm_check_tag(&cctx, data + ct_len) != 1) {
+    ESP_LOGW(TAG, "br_ccm_check_tag failed (wrong key/counter or tampered)");
+    return -1;
+  }
+  return static_cast<int>(ct_len);
+#else
+  (void) ct_len;
+  (void) nonce;
+  ESP_LOGW(TAG, "aes_ccm_decrypt: no AES backend available on this platform.");
+  return -1;
+#endif
 }
 
 /* ================================================================

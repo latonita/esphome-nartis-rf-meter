@@ -411,7 +411,4 @@ static constexpr uint32_t STATE_POLL_INTERVAL_US = 100;
 static constexpr uint8_t  RSSI_SCAN_LOOP_SAMPLES = 6;
 static constexpr uint32_t RSSI_SCAN_SAMPLE_DELAY_US = 2000;
 
-/* Chunked RX queue capacity — enough for max 290-byte packet at 12 bytes/chunk */
-static constexpr size_t RX_QUEUE_CAPACITY = 30;
-
 }  // namespace esphome::nartis_rf_meter
