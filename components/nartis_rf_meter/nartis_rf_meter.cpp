@@ -153,6 +153,15 @@ static const LogString *state_to_str(NartisRfMeterComponent::State s) {
     case NartisRfMeterComponent::State::IDLE: return LOG_STR("IDLE");
     case NartisRfMeterComponent::State::RSSI_SCAN: return LOG_STR("RSSI_SCAN");
     case NartisRfMeterComponent::State::CHANNEL_SELECT: return LOG_STR("CHANNEL_SELECT");
+    case NartisRfMeterComponent::State::PAIR_PROBE_TX: return LOG_STR("PAIR_PROBE_TX");
+    case NartisRfMeterComponent::State::PAIR_PROBE_WAIT_TX_DONE: return LOG_STR("PAIR_PROBE_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::PAIR_PROBE_WAIT_RESPONSE: return LOG_STR("PAIR_PROBE_WAIT_RESPONSE");
+    case NartisRfMeterComponent::State::PAIR_ACK_TX: return LOG_STR("PAIR_ACK_TX");
+    case NartisRfMeterComponent::State::PAIR_ACK_WAIT_TX_DONE: return LOG_STR("PAIR_ACK_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::PAIR_ACK_WAIT_RESPONSE: return LOG_STR("PAIR_ACK_WAIT_RESPONSE");
+    case NartisRfMeterComponent::State::PAIR_MODE6_TX: return LOG_STR("PAIR_MODE6_TX");
+    case NartisRfMeterComponent::State::PAIR_MODE6_WAIT_TX_DONE: return LOG_STR("PAIR_MODE6_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::PAIR_WAIT_KEEPALIVE: return LOG_STR("PAIR_WAIT_KEEPALIVE");
     case NartisRfMeterComponent::State::BEACON_TX: return LOG_STR("BEACON_TX");
     case NartisRfMeterComponent::State::BEACON_WAIT_TX_DONE: return LOG_STR("BEACON_WAIT_TX_DONE");
     case NartisRfMeterComponent::State::BEACON_WAIT_RESPONSE: return LOG_STR("BEACON_WAIT_RESPONSE");
@@ -184,6 +193,104 @@ void NartisRfMeterComponent::handle_state_() {
     case State::CHANNEL_SELECT:
       handle_channel_select_();
       break;
+
+    /* ---- Pairing handshake ---- */
+    case State::PAIR_PROBE_TX:
+      handle_pair_probe_tx_();
+      break;
+
+    case State::PAIR_PROBE_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::PAIR_PROBE_WAIT_RESPONSE);
+      break;
+
+    case State::PAIR_PROBE_WAIT_RESPONSE: {
+      RxStatus status = poll_rx_();
+      if (status == RxStatus::COMPLETE) {
+        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        RfFrameType rx_type;
+        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        if (n >= 0 && static_cast<uint8_t>(rx_type) == 0x06) {
+          ESP_LOGI(TAG, "Pairing: meter answered probe (0x06)");
+          capture_meter_address_();
+          pair_retry_ = 0;  // reset for the ACK phase
+          set_state_(State::PAIR_ACK_TX);
+        } else {
+          ESP_LOGW(TAG, "Pairing: unexpected probe response (type=0x%02X, n=%d)",
+                   n >= 0 ? static_cast<uint8_t>(rx_type) : 0, n);
+          set_state_(State::PAIR_PROBE_TX);  // retry
+        }
+      } else if (status == RxStatus::ERROR) {
+        ESP_LOGW(TAG, "Pairing: no probe response");
+        set_state_(State::PAIR_PROBE_TX);  // retry (bounded in handler)
+      }
+      break;
+    }
+
+    case State::PAIR_ACK_TX:
+      handle_pair_ack_tx_();
+      break;
+
+    case State::PAIR_ACK_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::PAIR_ACK_WAIT_RESPONSE);
+      break;
+
+    case State::PAIR_ACK_WAIT_RESPONSE: {
+      RxStatus status = poll_rx_();
+      if (status == RxStatus::COMPLETE) {
+        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        RfFrameType rx_type;
+        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : 0;
+        if (n >= 0 && t == 0x53) {
+          // SESSION_SETUP — the meter ships a key blob encrypted with its
+          // per-CIU factory pairing key (which we don't have). We don't need
+          // it: normal traffic uses the meter-serial-derived key we already
+          // hold. Acknowledge with the mode-6 plain reply and move on.
+          ESP_LOGI(TAG, "Pairing: SESSION_SETUP received (0x53) — proceeding");
+          set_state_(State::PAIR_MODE6_TX);
+        } else if (n >= 0 && (t == 0x5B || t == 0x40)) {
+          // Some meters skip straight to keepalive/ack — treat as paired.
+          ESP_LOGI(TAG, "Pairing: meter ready (0x%02X) — paired", t);
+          paired_ = true;
+          set_state_(State::BEACON_TX);
+        } else {
+          ESP_LOGW(TAG, "Pairing: unexpected ACK response (type=0x%02X, n=%d)", t, n);
+          set_state_(State::PAIR_ACK_TX);  // retry
+        }
+      } else if (status == RxStatus::ERROR) {
+        ESP_LOGW(TAG, "Pairing: no SESSION_SETUP response");
+        set_state_(State::PAIR_ACK_TX);  // retry (bounded in handler)
+      }
+      break;
+    }
+
+    case State::PAIR_MODE6_TX:
+      handle_pair_mode6_tx_();
+      break;
+
+    case State::PAIR_MODE6_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::PAIR_WAIT_KEEPALIVE);
+      break;
+
+    case State::PAIR_WAIT_KEEPALIVE: {
+      RxStatus status = poll_rx_();
+      if (status == RxStatus::COMPLETE) {
+        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        RfFrameType rx_type;
+        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        ESP_LOGI(TAG, "Pairing complete (meter replied 0x%02X). Now paired.",
+                 n >= 0 ? static_cast<uint8_t>(rx_type) : 0);
+        paired_ = true;
+        set_state_(State::BEACON_TX);
+      } else if (status == RxStatus::ERROR) {
+        // Keepalive is the meter's "I'm ready" nudge; if we miss it, still
+        // consider pairing done and try the beacon poll (it has its own retry).
+        ESP_LOGW(TAG, "Pairing: no keepalive — proceeding to beacon anyway");
+        paired_ = true;
+        set_state_(State::BEACON_TX);
+      }
+      break;
+    }
 
     case State::BEACON_TX:
       handle_beacon_tx_();
@@ -328,7 +435,120 @@ void NartisRfMeterComponent::handle_channel_select_() {
   rf_.set_channel(best);
   hal_.set_frequency_channel(best);
   ESP_LOGI(TAG, "Selected channel %d (RSSI: %d dBm)", best, rssi_readings_[best]);
-  set_state_(State::BEACON_TX);
+  // First contact requires the pairing handshake; once paired this boot we
+  // go straight to the beacon/poll cycle.
+  if (paired_) {
+    set_state_(State::BEACON_TX);
+  } else {
+    pair_retry_ = 0;
+    set_state_(State::PAIR_PROBE_TX);
+  }
+}
+
+/* ================================================================
+ * Pairing handshake
+ *
+ * First-contact sequence reverse-engineered from the dump-spi4 capture
+ * of a real CIU pairing with an I100 meter:
+ *
+ *   CIU → meter : plain mode-1 probe, payload = "0" + 12-digit meter serial
+ *   meter → CIU : 0x06 (presence ack)
+ *   CIU → meter : encrypted mode-2 ACK, payload = beacon template
+ *   meter → CIU : 0x53 SESSION_SETUP (key blob — not needed by us)
+ *   CIU → meter : plain mode-6, payload = 12-digit meter serial
+ *   meter → CIU : 0x5B keepalive
+ *   → normal beacon/GET poll begins (AES key = meter_serial || salt)
+ * ================================================================ */
+
+size_t NartisRfMeterComponent::build_pair_probe_payload_(uint8_t *out, size_t max) {
+  // 13 ASCII bytes: '0' prefix + 12-digit meter serial (verified in
+  // dump-spi4 "0021245003137" and dump-spi3 "0000000000000").
+  if (max < 1 + meter_serial_.size()) return 0;
+  out[0] = '0';
+  memcpy(out + 1, meter_serial_.c_str(), meter_serial_.size());
+  return 1 + meter_serial_.size();
+}
+
+void NartisRfMeterComponent::capture_meter_address_() {
+  // The meter's 8-byte RF address sits at rx[2..9] of any valid response.
+  // Capture it once so the RF layer can filter subsequent traffic to this
+  // meter (also helps reject the ambient-noise frames seen on RX).
+  if (rx_accum_len_ < RF_RX_ADDR + 8) return;
+  RfAddress meter = RfAddress::from_bytes(rx_accum_buf_ + RF_RX_ADDR);
+  rf_.set_meter_address(meter);
+  uint8_t b[8];
+  meter.to_bytes(b);
+  ESP_LOGI(TAG, "Meter address learned: %s", format_hex_pretty(b, 8).c_str());
+}
+
+void NartisRfMeterComponent::handle_pair_probe_tx_() {
+  if (pair_retry_ >= MAX_PAIR_RETRIES_) {
+    // No probe answer. The meter may already be paired (some only answer the
+    // beacon once paired) — fall back to the beacon/poll path instead of
+    // failing outright. If that also fails it lands in ERROR_RECOVERY.
+    ESP_LOGW(TAG, "Pairing: no probe answer after %d tries — trying beacon poll "
+                  "(meter may already be paired, or not in pairing mode)", pair_retry_);
+    paired_ = true;
+    set_state_(State::BEACON_TX);
+    return;
+  }
+  pair_retry_++;
+  ESP_LOGI(TAG, "Pairing: sending probe %d/%d for meter '%s'...",
+           pair_retry_, MAX_PAIR_RETRIES_, meter_serial_.c_str());
+
+  uint8_t payload[16];
+  size_t payload_len = build_pair_probe_payload_(payload, sizeof(payload));
+  if (payload_len == 0) {
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
+  // Plain mode-1 DATA frame (flags 0x46, marker 0x7A, enc_flag 0).
+  size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
+                                     RfFrameType::DATA, sequence_nr_++,
+                                     payload, payload_len);
+  if (frame_len == 0 || !transmit_frame_(RfFrameType::DATA, tx_buf_.data(), frame_len)) {
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
+  set_state_(State::PAIR_PROBE_WAIT_TX_DONE);
+}
+
+void NartisRfMeterComponent::handle_pair_ack_tx_() {
+  if (pair_retry_ >= MAX_PAIR_RETRIES_) {
+    ESP_LOGW(TAG, "Pairing failed: no SESSION_SETUP after %d ACKs", pair_retry_);
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
+  pair_retry_++;
+  ESP_LOGI(TAG, "Pairing: sending encrypted ACK %d/%d...", pair_retry_, MAX_PAIR_RETRIES_);
+  uint8_t ack_payload[29];
+  size_t payload_len = build_beacon_payload_(ack_payload, sizeof(ack_payload));
+  if (payload_len == 0) {
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
+  // Encrypted mode-2 ACK frame (flags 0x44).
+  size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
+                                     RfFrameType::ACK, sequence_nr_++,
+                                     ack_payload, payload_len);
+  if (frame_len == 0 || !transmit_frame_(RfFrameType::ACK, tx_buf_.data(), frame_len)) {
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
+  set_state_(State::PAIR_ACK_WAIT_TX_DONE);
+}
+
+void NartisRfMeterComponent::handle_pair_mode6_tx_() {
+  ESP_LOGI(TAG, "Pairing: sending mode-6 confirmation...");
+  // Plain mode-6 frame (flags 0x00, marker 0x8A), payload = 12-digit serial.
+  size_t frame_len = rf_.build_frame(
+      tx_buf_.data(), tx_buf_.size(), RfFrameType::PLAIN_DATA, sequence_nr_++,
+      reinterpret_cast<const uint8_t *>(meter_serial_.c_str()), meter_serial_.size());
+  if (frame_len == 0 || !transmit_frame_(RfFrameType::PLAIN_DATA, tx_buf_.data(), frame_len)) {
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
+  set_state_(State::PAIR_MODE6_WAIT_TX_DONE);
 }
 
 void NartisRfMeterComponent::handle_beacon_tx_() {
@@ -607,44 +827,30 @@ void NartisRfMeterComponent::derive_rf_address_() {
 size_t NartisRfMeterComponent::build_beacon_payload_(uint8_t *out, size_t max) {
   if (max < 29) return 0;
 
-  uint8_t addr_bytes[8];
-  address_.to_bytes(addr_bytes);
+  // 29-byte beacon payload — a fixed Nartis TLV template with a 6-byte RTC
+  // timestamp patched in. Reconstructed byte-for-byte from real on-air
+  // beacons decrypted out of the SPI captures (fw/dump-spi2), which is the
+  // authoritative source: those beacons are the ones the meter actually
+  // answered. The firmware builds this from flash templates at 0xCA1C/
+  // 0xCA20/0xCA24/0xCA28 plus the "1234" constant at 0xB620 — NOT from the
+  // RF address (the earlier implementation's mistake).
+  //
+  //   [0..3]   0d fd 0d 04        TLV: tag 0x0dfd, type 0x0d, len 4
+  //   [4..7]   "1234"             4-byte payload (the static pairing PIN)
+  //   [8..11]  0d fd 0f 02        TLV: tag 0x0dfd, type 0x0f, len 2
+  //   [12..13] 02 05              that TLV's 2-byte value
+  //   [14..15] 06 6d              i32 high half (constant 0x066d)
+  //   [16..21] RTC timestamp      6-byte bit-packed clock (varies per beacon)
+  //   [22..24] 04 fd 17           TLV: tag 0x04fd, len/type 0x17
+  //   [25..28] 00 00 00 00        trailing u32 (always 0 in captures)
+  static constexpr uint8_t BEACON_HEAD[16] = {
+      0x0D, 0xFD, 0x0D, 0x04, 0x31, 0x32, 0x33, 0x34,
+      0x0D, 0xFD, 0x0F, 0x02, 0x02, 0x05, 0x06, 0x6D};
+  static constexpr uint8_t BEACON_TAIL[7] = {0x04, 0xFD, 0x17, 0x00, 0x00, 0x00, 0x00};
 
-  // [0-3] meter address (serial_hash bytes = addr[2..5])
-  memcpy(out, addr_bytes + 2, 4);
-
-  // [4-8] static factory bytes "1234\0"
-  memcpy(out + 4, "1234", 5);  // includes null terminator
-
-  // [8-11] extended address (device_id LE + group + type = addr[0,1,6,7])
-  out[8]  = addr_bytes[0];
-  out[9]  = addr_bytes[1];
-  out[10] = addr_bytes[6];
-  out[11] = addr_bytes[7];
-
-  // [12] frame subtype
-  out[12] = 0x07;
-
-  // [13] protocol version
-  out[13] = 0x04;
-
-  // [14-15] channel config (2 bytes LE)
-  out[14] = rf_.get_channel();
-  out[15] = 0x00;
-
-  // [16-21] RTC timestamp (6 bytes, bit-packed)
-  build_rtc_timestamp_(out + 16);
-
-  // [22-24] device ID (3 bytes from address)
-  out[22] = addr_bytes[0];
-  out[23] = addr_bytes[1];
-  out[24] = addr_bytes[2];
-
-  // [25-28] mode/sync/seq config bytes
-  out[25] = 0x00;           // mode
-  out[26] = 0x00;           // sync
-  out[27] = sequence_nr_;   // current sequence
-  out[28] = 0x00;           // reserved
+  memcpy(out, BEACON_HEAD, sizeof(BEACON_HEAD));
+  build_rtc_timestamp_(out + 16);          // [16..21]
+  memcpy(out + 22, BEACON_TAIL, sizeof(BEACON_TAIL));
 
   return 29;
 }

@@ -73,6 +73,17 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     // Channel scan
     RSSI_SCAN,
     CHANNEL_SELECT,
+    // First-time pairing handshake (only when not yet paired this boot)
+    //   probe (plain, meter serial) → 0x06 → ACK (enc) → 0x53 → mode-6 (plain) → keepalive
+    PAIR_PROBE_TX,
+    PAIR_PROBE_WAIT_TX_DONE,
+    PAIR_PROBE_WAIT_RESPONSE,
+    PAIR_ACK_TX,
+    PAIR_ACK_WAIT_TX_DONE,
+    PAIR_ACK_WAIT_RESPONSE,
+    PAIR_MODE6_TX,
+    PAIR_MODE6_WAIT_TX_DONE,
+    PAIR_WAIT_KEEPALIVE,
     // Beacon (wake up meter)
     BEACON_TX,
     BEACON_WAIT_TX_DONE,
@@ -99,6 +110,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // State handlers
   void handle_rssi_scan_();
   void handle_channel_select_();
+  // Pairing handshake handlers
+  void handle_pair_probe_tx_();
+  void handle_pair_ack_tx_();
+  void handle_pair_mode6_tx_();
+  size_t build_pair_probe_payload_(uint8_t *out, size_t max);
+  void capture_meter_address_();
   void handle_beacon_tx_();
   void handle_wait_tx_done_(State next_state);
   void handle_get_tx_();
@@ -170,6 +187,11 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   uint8_t sequence_nr_{0};
   int8_t rssi_readings_[4]{};
   uint8_t rssi_scan_ch_{0};
+
+  /* ---- Pairing state ---- */
+  bool paired_{false};       // set once the handshake completes this boot
+  uint8_t pair_retry_{0};
+  static constexpr uint8_t MAX_PAIR_RETRIES_ = 4;
 
   /* ---- Buffers ---- */
   std::array<uint8_t, MAX_RF_FRAME_SIZE> tx_buf_{};
