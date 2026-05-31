@@ -635,53 +635,29 @@ void Cmt2300aHal::prepare_rx_session() {
 }
 
 size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
-  // Gated by the RX packet engine — NOT by the raw "FIFO not empty" flag.
+  // RX completion is signaled on the GPIO1 pin (configured INT1 = PKT_DONE),
+  // read directly as a GPIO input. This mirrors the CIU firmware, which polls
+  // the chip's INT *output pins* (memory-mapped MCU GPIO) rather than reading
+  // the SPI status registers 0x6D/0x6E — those live in the chip's "Control2
+  // bank" and read back 0xFF in this bit-bang setup, so they are unusable.
   //
-  // FIFO_RX_NMTY is unreliable as a drain gate here: right after a TX→RX
-  // switch it can read back stuck/garbage on an empty FIFO, which would
-  // drain the whole buffer of zeros. Instead we mirror the original ISR
-  // design (and the CIU firmware): the chip asserts FIFO_RX_TH only when
-  // >= FIFO_TH_VALUE real bytes have been written by the receiver, and
-  // asserts PKT_OK (INT_FLAG) when a complete packet has arrived. With no
-  // incoming packet, both stay low and we drain nothing.
-  size_t total = 0;
-
-  // Overflow / invalid-state guard. A real packet never sets RX_OVF; if it's
-  // set (or the register reads all-ones), the FIFO is in a bad state — reset
-  // it and report "nothing received" rather than draining garbage.
-  uint8_t f0 = spi_read_reg(REG_FIFO_FLAG);
-  if (f0 == 0xFF || (f0 & FIFO_RX_OVF)) {
-    static uint8_t ovf_log = 0;
-    if (ovf_log < 4) {
-      ESP_LOGW(TAG, "RX FIFO overflow/invalid (FIFO_FLAG=0x%02X) — resetting", f0);
-      ovf_log++;
-    }
-    reset_rx_fifo_full();
-    write_reg(REG_INT_CLR1, CLR1_TX_DONE_CLR | CLR1_SL_TMO_CLR | CLR1_RX_TMO_CLR);
-    write_reg(REG_INT_CLR2, CLR2_LBD_CLR | CLR2_PREAM_OK_CLR | CLR2_SYNC_OK_CLR |
-                            CLR2_NODE_OK_CLR | CLR2_CRC_OK_CLR | CLR2_PKT_DONE_CLR);
-    return 0;
+  // NOTE: this reads a whole packet once PKT_DONE asserts, so it requires the
+  // frame to fit in the 64-byte FIFO. All pairing frames (0x06=25B, 0x53=59B,
+  // keepalive=25B) do. Larger GET responses (>64B) will need GPIO-driven
+  // FIFO_TH chunking — a separate follow-up.
+  if (buf_size == 0) return 0;
+  if (!pin_read(gpio1_)) {
+    return 0;  // no completed packet yet
   }
 
-  // 1. Bulk: pull threshold-sized chunks the receiver has delivered so far.
-  //    Required for packets larger than the 64-byte FIFO (drained mid-RX).
-  while (total + FIFO_TH_VALUE <= buf_size &&
-         (spi_read_reg(REG_FIFO_FLAG) & FIFO_RX_TH)) {
-    spi_read_fifo(buf + total, FIFO_TH_VALUE);
-    total += FIFO_TH_VALUE;
-  }
-
-  // 2. Tail: once the packet is complete, drain the remaining (< threshold)
-  //    bytes. Bounded by one FIFO depth so a stuck not-empty flag can never
-  //    run away.
-  if (spi_read_reg(REG_INT_FLAG) & FLAG_PKT_OK) {
-    for (size_t guard = 0; guard < FIFO_SIZE_MERGED && total < buf_size; guard++) {
-      if (!(spi_read_reg(REG_FIFO_FLAG) & FIFO_RX_NMTY)) {
-        break;  // FIFO drained
-      }
-      spi_read_fifo(buf + total, 1);
-      total += 1;
-    }
+  // PKT_DONE asserted — the full frame sits in the RX FIFO. byte[0] = len-1.
+  uint8_t lenb = 0;
+  spi_read_fifo(&lenb, 1);
+  size_t total = static_cast<size_t>(lenb) + 1;
+  if (total > buf_size) total = buf_size;
+  buf[0] = lenb;
+  if (total > 1) {
+    spi_read_fifo(buf + 1, total - 1);
   }
   return total;
 }
