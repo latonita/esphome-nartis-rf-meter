@@ -202,6 +202,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   size_t rx_accum_len_{0};
   size_t rx_expected_len_{0};
   bool rx_active_{false};
+  uint32_t rx_tail_wait_ms_{0};  // 0 = not waiting; else millis() when tail-wait started
+  static constexpr uint32_t RX_TAIL_WAIT_MS_ = 30;  // let sub-threshold tail bytes arrive
 
   /* ---- Sensors ---- */
   std::vector<SensorEntry> sensors_;

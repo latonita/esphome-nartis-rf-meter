@@ -405,6 +405,7 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 
   hal_.set_frequency_channel(rssi_scan_ch_);
   hal_.go_standby();
+  hal_.set_rssi_mode(true);  // RSSI-valid mode so get_rssi_dbm() reads real values
   hal_.go_rx();
 
   // Take 7 readings with 2ms spacing (matching firmware)
@@ -429,6 +430,7 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 
   rssi_scan_ch_++;
   if (rssi_scan_ch_ >= NUM_CHANNELS) {
+    hal_.set_rssi_mode(false);  // restore merged-FIFO mode for TX/RX
     rssi_scan_ch_ = 0;
     set_state_(State::CHANNEL_SELECT);
   }
@@ -906,11 +908,12 @@ void NartisRfMeterComponent::start_rx_() {
   hal_.reset_rx_fifo_full();   // FIFO_RESTORE + clear RX/TX
   hal_.clear_interrupt_flags();
 
-  // Route INT1 → PKT_DONE so the GPIO1 pin goes high when a full frame is
-  // received. (TX left INT1 = TX_FIFO_TH; restore it for RX.) We detect RX
-  // completion by reading the GPIO1 pin — like the firmware — not via SPI
-  // status registers.
-  hal_.set_int1_source(INT_SEL_PKT_DONE);
+  // Route the INT line → RX_FIFO_TH (the firmware's RX mechanism). The pin
+  // goes HIGH while >= FIFO_TH_VALUE bytes await in the RX FIFO; we drain
+  // threshold chunks on that, and read the trailing sub-threshold bytes by
+  // frame length. (TX left it on TX_FIFO_TH; this restores it for RX.)
+  hal_.set_int1_source(INT_SEL_RX_FIFO_TH);
+  rx_tail_wait_ms_ = 0;
 
   // Enter RX mode: STBY → RFS → RX
   hal_.write_reg(REG_MODE_CTL, GO_RFS);
@@ -943,6 +946,23 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
       return RxStatus::ERROR;
     }
     ESP_LOGD(TAG, "RX expecting %d bytes total", (int) rx_expected_len_);
+  }
+
+  // Tail read: the final < FIFO_TH_VALUE bytes never raise RX_FIFO_TH, so the
+  // chunk-drain above can't fetch them. Once we know the length and only the
+  // sub-threshold tail remains, read it directly by length — but wait briefly
+  // first so those bytes have actually been received (at 4800 bps ~600 B/s, up
+  // to 11 trailing bytes take <20 ms to arrive).
+  if (rx_expected_len_ > 0 && rx_accum_len_ < rx_expected_len_) {
+    size_t remaining = rx_expected_len_ - rx_accum_len_;
+    if (remaining < FIFO_TH_VALUE) {
+      if (rx_tail_wait_ms_ == 0) {
+        rx_tail_wait_ms_ = esphome::millis();
+      } else if (esphome::millis() - rx_tail_wait_ms_ >= RX_TAIL_WAIT_MS_) {
+        hal_.read_fifo(rx_accum_buf_ + rx_accum_len_, remaining);
+        rx_accum_len_ += remaining;
+      }
+    }
   }
 
   // Check if we have the complete packet

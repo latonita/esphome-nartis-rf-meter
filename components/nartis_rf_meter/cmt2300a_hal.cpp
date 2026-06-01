@@ -280,24 +280,33 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // REG_PKT29 (0x54): (reg & 0xE0) | 0x0C
   update_reg(REG_PKT29, MASK_FIFO_TH, FIFO_TH_VALUE);
 
-  // Route INT1 onto BOTH GPIO1 and GPIO2 so the module's "NIRQ" pin carries
-  // it regardless of which internal GPIO that pin maps to. (Common CMT2300A
-  // breakout modules expose NIRQ = chip GPIO1 or GPIO2; GPIO3 can NOT output
-  // INT1, only INT2/CLKO, so it must not be used for our interrupt line.)
-  // We poll this pin for both TX_FIFO_TH (during TX) and PKT_DONE (during RX).
-  update_reg(REG_IO_SEL, MASK_GPIO1_SEL | MASK_GPIO2_SEL,
-             GPIO1_SEL_INT1 | GPIO2_SEL_INT1);
+  // Route ALL exposed GPIOs to INT2. On these breakout modules the "NIRQ" pad
+  // (chip GPIO1/GPIO2) and the "GPIO3" pad are commonly tied to one net; if we
+  // drove INT1 on one and INT2 on the other we'd have two push-pull outputs
+  // fighting on the shared net. Driving every pin from the SAME INT2 signal
+  // means they always output the identical level — no contention — and
+  // whichever pad you wire to pin_gpio1 carries it.
+  //   GPIO1 = INT2 (0x02), GPIO2 = INT2 (0x04), GPIO3 = INT2 (0x20)
+  update_reg(REG_IO_SEL, MASK_GPIO1_SEL | MASK_GPIO2_SEL | MASK_GPIO3_SEL,
+             GPIO1_SEL_INT2 | GPIO2_SEL_INT2 | GPIO3_SEL_INT2);
 
-  // INT1 source = PKT_DONE (fires on both RX complete and TX complete)
-  update_reg(REG_INT1_CTL, MASK_INT1_SEL, INT_SEL_PKT_DONE);
+  // INT2 source = PKT_DONE, ACTIVE-HIGH polarity. The firmware uses active
+  // high (it preserves the POR-default polar bit = 0 and reads "pin HIGH =
+  // event"); SETTING the polar bit makes the line active-LOW (idle-high),
+  // which falsely reads as "packet done" every poll. So clear it (= 0).
+  // set_int1_source() updates both INT1_CTL and INT2_CTL, so the live signal
+  // (TX_FIFO_TH during TX, RX_FIFO_TH during RX) always lands on INT2/GPIO3.
+  // Default to RX_FIFO_TH, matching the firmware (cmt_post_config: INT2=0x0C).
+  update_reg(REG_INT2_CTL, MASK_INT2_SEL, INT_SEL_RX_FIFO_TH);
+  update_reg(REG_INT2_CTL, MASK_INT_POLAR, 0x00);
+  update_reg(REG_INT1_CTL, MASK_INT1_SEL, INT_SEL_RX_FIFO_TH);
+  update_reg(REG_INT1_CTL, MASK_INT_POLAR, 0x00);
 
-  // INT polarity: active high
-  update_reg(REG_INT1_CTL, MASK_INT_POLAR, MASK_INT_POLAR);
-
-  // Enable PKT_DONE interrupt
+  // Enable PKT_DONE + TX_DONE latched interrupts (FIFO_TH on the GPIO follows
+  // the INT mux regardless of INT_EN).
   write_reg(REG_INT_EN, INT_EN_PKT_DONE | INT_EN_TX_DONE);
 
-  ESP_LOGD(TAG, "Runtime overrides applied (FIFO merge=64B, GPIO1=INT1/PKT_DONE)");
+  ESP_LOGD(TAG, "Runtime overrides applied (FIFO merge=64B; GPIO1/2/3 -> INT2, active-high, RX_FIFO_TH)");
 }
 
 /* ================================================================
@@ -522,12 +531,16 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   // Tell the packet engine how many bytes to transmit (fixed-length mode).
   set_tx_payload_length(static_cast<uint16_t>(len));
 
-  clear_tx_fifo();
   clear_interrupt_flags();
 
-  // Set merged FIFO direction to TX (firmware: FIFO_CTL |= 0x05)
-  update_reg(REG_FIFO_CTL, MASK_FIFO_RX_TX_SEL | MASK_SPI_FIFO_RD_WR_SEL,
-             MASK_FIFO_RX_TX_SEL | MASK_SPI_FIFO_RD_WR_SEL);
+  // Switch the merged FIFO fully to TX-WRITE mode and reset its pointers. This
+  // MUST recover from a preceding RX session (which left it in SPI-read /
+  // RX-direction mode); otherwise the FIFO write below lands nowhere and the
+  // chip stalls waiting for TX data → TX_DONE never fires.
+  //   FIFO_MERGE_EN on, FIFO_RX_TX_SEL=1 (TX), SPI_FIFO_RD_WR_SEL=1 (SPI writes)
+  update_reg(REG_FIFO_CTL, MASK_FIFO_MERGE_EN | MASK_FIFO_RX_TX_SEL | MASK_SPI_FIFO_RD_WR_SEL,
+             MASK_FIFO_MERGE_EN | MASK_FIFO_RX_TX_SEL | MASK_SPI_FIFO_RD_WR_SEL);
+  write_reg(REG_FIFO_CLR, FIFO_RESTORE | FIFO_CLR_RX | FIFO_CLR_TX);
 
   // Configure INT1 = TX_FIFO_TH (fires when FIFO drops below threshold)
   set_int1_source(INT_SEL_TX_FIFO_TH);
@@ -544,9 +557,13 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
     return false;
   }
   spi_write_reg(REG_MODE_CTL, GO_TX);
+  if (!wait_for_state(STA_TX)) {
+    ESP_LOGW(TAG, "Chunked TX: chip did not enter TX (state=0x%02X)", get_state());
+  }
 
-  // Poll: refill FIFO as it drains, wait for TX_DONE
-  static constexpr uint32_t TX_TIMEOUT_MS = 2000;
+  // Poll: refill FIFO as it drains, wait for TX_DONE.
+  // 600 ms covers the largest frame (~290 B ≈ 480 ms airtime at 4800 bps).
+  static constexpr uint32_t TX_TIMEOUT_MS = 600;
   uint32_t start = esphome::millis();
 
   while (esphome::millis() - start < TX_TIMEOUT_MS) {
@@ -565,10 +582,14 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
       written += chunk;
     }
 
+    // Feed the watchdog — this loop can block for many ms and ESP8266's soft
+    // WDT resets if we spin without yielding.
+    esphome::yield();
     esphome::delayMicroseconds(50);
   }
 
-  ESP_LOGW(TAG, "Chunked TX timeout (%d/%d bytes written)", (int) written, (int) len);
+  ESP_LOGW(TAG, "Chunked TX timeout (%d/%d bytes written, state=0x%02X, int_clr1=0x%02X)",
+           (int) written, (int) len, get_state(), spi_read_reg(REG_INT_CLR1));
   go_standby();
   return false;
 }
@@ -610,6 +631,12 @@ uint8_t Cmt2300aHal::get_rssi_code() {
   return spi_read_reg(REG_RSSI_CODE);
 }
 
+void Cmt2300aHal::set_rssi_mode(bool enable) {
+  // SYS11 (0x16) low 5 bits: 0x01 = RSSI-valid mode (get_rssi_dbm() reads real
+  // values), FIFO_MERGE_VALUE (0x12) = normal merged-FIFO packet mode.
+  update_reg(REG_SYS11, 0x1F, enable ? 0x01 : FIFO_MERGE_VALUE);
+}
+
 uint8_t Cmt2300aHal::get_fifo_flags() {
   return spi_read_reg(REG_FIFO_FLAG);
 }
@@ -634,9 +661,9 @@ bool Cmt2300aHal::test_gpio1_wiring() {
   esphome::delayMicroseconds(300);
   bool in_rx = pin_read(gpio1_);
 
-  // Restore: standby + INT1 = PKT_DONE for normal RX operation.
+  // Restore: standby + INT source back to RX_FIFO_TH for normal operation.
   go_standby();
-  set_int1_source(INT_SEL_PKT_DONE);
+  set_int1_source(INT_SEL_RX_FIFO_TH);
 
   bool ok = (!in_stby && in_rx);
   if (ok) {
@@ -654,10 +681,12 @@ bool Cmt2300aHal::test_gpio1_wiring() {
  * ================================================================ */
 
 void Cmt2300aHal::set_int1_source(uint8_t source) {
-  // Preserve INT_POLAR bit, update INT1_SEL field.
-  // Kept for the TX-chunked path; the RX path no longer relies on the
-  // chip's GPIO1 interrupt line — we poll REG_FIFO_FLAG via SPI instead.
+  // Drive the SAME source onto BOTH INT1 and INT2 (preserving each polarity
+  // bit). INT1 surfaces on GPIO1/GPIO2 (the module's NIRQ pin) and INT2 on
+  // GPIO3 — so whichever of those the user wired to pin_gpio1 carries the
+  // signal we poll (TX_FIFO_TH during TX, PKT_DONE during RX).
   update_reg(REG_INT1_CTL, MASK_INT1_SEL, source & MASK_INT1_SEL);
+  update_reg(REG_INT2_CTL, MASK_INT2_SEL, source & MASK_INT2_SEL);
 }
 
 void Cmt2300aHal::prepare_rx_session() {
@@ -671,29 +700,18 @@ void Cmt2300aHal::prepare_rx_session() {
 }
 
 size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
-  // RX completion is signaled on the GPIO1 pin (configured INT1 = PKT_DONE),
-  // read directly as a GPIO input. This mirrors the CIU firmware, which polls
-  // the chip's INT *output pins* (memory-mapped MCU GPIO) rather than reading
-  // the SPI status registers 0x6D/0x6E — those live in the chip's "Control2
-  // bank" and read back 0xFF in this bit-bang setup, so they are unusable.
+  // RX_FIFO_TH-driven chunk drain — the firmware's mechanism. INT2 (=RX_FIFO_TH)
+  // surfaces on the GPIO pin and is HIGH while >= FIFO_TH_VALUE bytes sit in the
+  // RX FIFO. We poll that pin (the firmware reads the chip's INT output pins via
+  // MCU GPIO too; the SPI status regs 0x6D/0x6E read 0xFF here — Control2 bank —
+  // so they're unusable). Drain full threshold chunks while the line is asserted.
   //
-  // NOTE: this reads a whole packet once PKT_DONE asserts, so it requires the
-  // frame to fit in the 64-byte FIFO. All pairing frames (0x06=25B, 0x53=59B,
-  // keepalive=25B) do. Larger GET responses (>64B) will need GPIO-driven
-  // FIFO_TH chunking — a separate follow-up.
-  if (buf_size == 0) return 0;
-  if (!pin_read(gpio1_)) {
-    return 0;  // no completed packet yet
-  }
-
-  // PKT_DONE asserted — the full frame sits in the RX FIFO. byte[0] = len-1.
-  uint8_t lenb = 0;
-  spi_read_fifo(&lenb, 1);
-  size_t total = static_cast<size_t>(lenb) + 1;
-  if (total > buf_size) total = buf_size;
-  buf[0] = lenb;
-  if (total > 1) {
-    spi_read_fifo(buf + 1, total - 1);
+  // The trailing < FIFO_TH_VALUE bytes of a frame never raise RX_FIFO_TH; the
+  // caller (poll_rx_) reads that tail by frame length once it has arrived.
+  size_t total = 0;
+  while (total + FIFO_TH_VALUE <= buf_size && pin_read(gpio1_)) {
+    spi_read_fifo(buf + total, FIFO_TH_VALUE);
+    total += FIFO_TH_VALUE;
   }
   return total;
 }

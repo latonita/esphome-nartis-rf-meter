@@ -129,6 +129,10 @@ class Cmt2300aHal {
   /// Read raw RSSI code.
   uint8_t get_rssi_code();
 
+  /// Enable RSSI-valid mode (SYS11 = ...|0x01) so get_rssi_dbm() returns real
+  /// values; pass false to restore the FIFO-merge config for normal packet I/O.
+  void set_rssi_mode(bool enable);
+
   /// Scan all NUM_CHANNELS channels, return the channel index with the lowest
   /// trimmed-mean RSSI. Exact replica of CIU firmware rssi_channel_select (0x000134A4):
   ///   per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,

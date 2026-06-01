@@ -14,6 +14,7 @@ CONF_PIN_SCLK = "pin_sclk"
 CONF_PIN_CSB = "pin_csb"
 CONF_PIN_FCSB = "pin_fcsb"
 CONF_PIN_GPIO1 = "pin_gpio1"
+CONF_PIN_GPIO3 = "pin_gpio3"
 CONF_METER_SERIAL = "meter_serial"
 CONF_CIU_SERIAL = "ciu_serial"
 
@@ -34,7 +35,7 @@ def validate_meter_serial(value):
     return s
 
 
-CONFIG_SCHEMA = (
+CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(NartisRfMeterComponent),
@@ -43,16 +44,22 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_PIN_SCLK): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_CSB): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_FCSB): pins.internal_gpio_output_pin_schema,
-            # CMT2300A interrupt pin (input, active high)
-            cv.Required(CONF_PIN_GPIO1): pins.internal_gpio_input_pin_schema,
+            # CMT2300A interrupt pin (input, active high). The firmware drives
+            # the same RX/TX interrupt onto NIRQ (chip GPIO1/GPIO2, via INT1)
+            # AND onto the GPIO3 pad (via INT2), so wire whichever your module
+            # exposes and declare the matching ESP pin here. Provide exactly
+            # one of pin_gpio1 (NIRQ) or pin_gpio3 (GPIO3 pad).
+            cv.Optional(CONF_PIN_GPIO1): pins.internal_gpio_input_pin_schema,
+            cv.Optional(CONF_PIN_GPIO3): pins.internal_gpio_input_pin_schema,
             # Meter serial number (12 digits, printed on the meter nameplate).
             cv.Required(CONF_METER_SERIAL): validate_meter_serial,
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
         }
-    )
-    .extend(cv.polling_component_schema("60s"))
+    ).extend(cv.polling_component_schema("60s")),
+    # Exactly one interrupt pin must be wired/declared.
+    cv.has_exactly_one_key(CONF_PIN_GPIO1, CONF_PIN_GPIO3),
 )
 
 
@@ -69,8 +76,11 @@ async def to_code(config):
     cg.add(var.set_pin_csb(csb))
     fcsb = await cg.gpio_pin_expression(config[CONF_PIN_FCSB])
     cg.add(var.set_pin_fcsb(fcsb))
-    gpio1 = await cg.gpio_pin_expression(config[CONF_PIN_GPIO1])
-    cg.add(var.set_pin_gpio1(gpio1))
+    # Interrupt pin: NIRQ (pin_gpio1) or the GPIO3 pad (pin_gpio3) — whichever
+    # is declared. Both carry the same INT signal; the HAL polls this one pin.
+    irq_conf = config.get(CONF_PIN_GPIO1, config.get(CONF_PIN_GPIO3))
+    irq = await cg.gpio_pin_expression(irq_conf)
+    cg.add(var.set_pin_gpio1(irq))
 
     cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
     if config[CONF_CIU_SERIAL]:
