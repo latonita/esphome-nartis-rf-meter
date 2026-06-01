@@ -37,6 +37,10 @@ void NartisRfMeterComponent::setup_continue_() {
     return;
   }
 
+  // One-time GPIO1/NIRQ wiring self-test (decisive: RX is impossible if the
+  // chip's interrupt line isn't reaching the configured pin_gpio1).
+  hal_.test_gpio1_wiring();
+
   // Derive RF address from CIU serial (or ESP32 MAC)
   derive_rf_address_();
 

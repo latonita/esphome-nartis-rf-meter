@@ -280,8 +280,13 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // REG_PKT29 (0x54): (reg & 0xE0) | 0x0C
   update_reg(REG_PKT29, MASK_FIFO_TH, FIFO_TH_VALUE);
 
-  // GPIO1 = INT1 (for packet done / TX done interrupts)
-  update_reg(REG_IO_SEL, MASK_GPIO1_SEL, GPIO1_SEL_INT1);
+  // Route INT1 onto BOTH GPIO1 and GPIO2 so the module's "NIRQ" pin carries
+  // it regardless of which internal GPIO that pin maps to. (Common CMT2300A
+  // breakout modules expose NIRQ = chip GPIO1 or GPIO2; GPIO3 can NOT output
+  // INT1, only INT2/CLKO, so it must not be used for our interrupt line.)
+  // We poll this pin for both TX_FIFO_TH (during TX) and PKT_DONE (during RX).
+  update_reg(REG_IO_SEL, MASK_GPIO1_SEL | MASK_GPIO2_SEL,
+             GPIO1_SEL_INT1 | GPIO2_SEL_INT1);
 
   // INT1 source = PKT_DONE (fires on both RX complete and TX complete)
   update_reg(REG_INT1_CTL, MASK_INT1_SEL, INT_SEL_PKT_DONE);
@@ -611,6 +616,37 @@ uint8_t Cmt2300aHal::get_fifo_flags() {
 
 bool Cmt2300aHal::read_gpio1() {
   return pin_read(gpio1_);
+}
+
+bool Cmt2300aHal::test_gpio1_wiring() {
+  // INT1 = RX_ACTIVE → pin is high only while the chip sits in RX state.
+  set_int1_source(INT_SEL_RX_ACTIVE);
+
+  go_standby();
+  esphome::delayMicroseconds(300);
+  bool in_stby = pin_read(gpio1_);
+
+  // Enter RX (STBY → RFS → RX) and sample the pin.
+  spi_write_reg(REG_MODE_CTL, GO_RFS);
+  wait_for_state(STA_RFS);
+  spi_write_reg(REG_MODE_CTL, GO_RX);
+  wait_for_state(STA_RX);
+  esphome::delayMicroseconds(300);
+  bool in_rx = pin_read(gpio1_);
+
+  // Restore: standby + INT1 = PKT_DONE for normal RX operation.
+  go_standby();
+  set_int1_source(INT_SEL_PKT_DONE);
+
+  bool ok = (!in_stby && in_rx);
+  if (ok) {
+    ESP_LOGI(TAG, "GPIO1 wiring OK: pin LOW in STBY, HIGH in RX (NIRQ→pin_gpio1 good)");
+  } else {
+    ESP_LOGE(TAG, "GPIO1 wiring FAIL: STBY=%d RX=%d (expected 0 then 1). "
+                  "Check NIRQ is wired to pin_gpio1 — RX cannot work otherwise.",
+             in_stby, in_rx);
+  }
+  return ok;
 }
 
 /* ================================================================

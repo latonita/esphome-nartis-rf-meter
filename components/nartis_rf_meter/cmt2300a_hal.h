@@ -148,6 +148,13 @@ class Cmt2300aHal {
   /// Read GPIO1 pin state (interrupt line).
   bool read_gpio1();
 
+  /// One-time wiring self-test for the NIRQ/GPIO1 line. Temporarily routes
+  /// INT1 = RX_ACTIVE (high only while the chip is in RX), reads the pin in
+  /// STBY (expect low) and in RX (expect high), then restores INT1 = PKT_DONE.
+  /// Returns true if the pin tracked the state (i.e. NIRQ is wired correctly
+  /// to the configured pin_gpio1). Logs the raw readings either way.
+  bool test_gpio1_wiring();
+
   /// Set INT1 source field of REG_INT1_CTL. Used internally by the
   /// TX-chunked path; harmless on the RX path since we no longer read
   /// the GPIO1 line as an interrupt.
