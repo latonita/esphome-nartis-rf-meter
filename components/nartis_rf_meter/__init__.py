@@ -13,7 +13,6 @@ CONF_PIN_SDIO = "pin_sdio"
 CONF_PIN_SCLK = "pin_sclk"
 CONF_PIN_CSB = "pin_csb"
 CONF_PIN_FCSB = "pin_fcsb"
-CONF_PIN_GPIO1 = "pin_gpio1"
 CONF_PIN_GPIO3 = "pin_gpio3"
 CONF_METER_SERIAL = "meter_serial"
 CONF_CIU_SERIAL = "ciu_serial"
@@ -67,13 +66,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_PIN_SCLK): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_CSB): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_FCSB): pins.internal_gpio_output_pin_schema,
-            # CMT2300A interrupt pin (input, active high). The firmware drives
-            # the same RX/TX interrupt onto NIRQ (chip GPIO1/GPIO2, via INT1)
-            # AND onto the GPIO3 pad (via INT2), so wire whichever your module
-            # exposes and declare the matching ESP pin here. Provide exactly
-            # one of pin_gpio1 (NIRQ) or pin_gpio3 (GPIO3 pad).
-            cv.Optional(CONF_PIN_GPIO1): pins.internal_gpio_input_pin_schema,
-            cv.Optional(CONF_PIN_GPIO3): pins.internal_gpio_input_pin_schema,
+            # CMT2300A interrupt pin (input, active high). The chip's GPIO3 pad
+            # carries INT2, which we mux to the FIFO-threshold signal we poll
+            # (RX_FIFO_TH in RX, TX_FIFO_TH in TX). On the CMT2300A only GPIO3
+            # can output INT2, so wire the chip's GPIO3 pad to this ESP pin.
+            cv.Required(CONF_PIN_GPIO3): pins.internal_gpio_input_pin_schema,
             # Meter serial number (12 digits, printed on the meter nameplate).
             # Required for active polling; optional in sniff_mode (see validator below).
             cv.Optional(CONF_METER_SERIAL): validate_meter_serial,
@@ -92,8 +89,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_CIU_ADDRESS): validate_ciu_address,
         }
     ).extend(cv.polling_component_schema("60s")),
-    # Exactly one interrupt pin must be wired/declared.
-    cv.has_exactly_one_key(CONF_PIN_GPIO1, CONF_PIN_GPIO3),
     _require_meter_serial_unless_sniff,
 )
 
@@ -111,11 +106,10 @@ async def to_code(config):
     cg.add(var.set_pin_csb(csb))
     fcsb = await cg.gpio_pin_expression(config[CONF_PIN_FCSB])
     cg.add(var.set_pin_fcsb(fcsb))
-    # Interrupt pin: NIRQ (pin_gpio1) or the GPIO3 pad (pin_gpio3) — whichever
-    # is declared. Both carry the same INT signal; the HAL polls this one pin.
-    irq_conf = config.get(CONF_PIN_GPIO1, config.get(CONF_PIN_GPIO3))
-    irq = await cg.gpio_pin_expression(irq_conf)
-    cg.add(var.set_pin_gpio1(irq))
+    # Interrupt pin: the chip's GPIO3 pad (INT2). The HAL polls this pin for the
+    # FIFO-threshold signal that drives RX/TX FIFO draining.
+    irq = await cg.gpio_pin_expression(config[CONF_PIN_GPIO3])
+    cg.add(var.set_pin_gpio3(irq))
 
     if config[CONF_SNIFF_MODE]:
         cg.add(var.set_sniff_mode(True))

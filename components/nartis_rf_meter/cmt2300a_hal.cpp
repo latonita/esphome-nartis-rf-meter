@@ -163,19 +163,19 @@ void Cmt2300aHal::update_reg(uint8_t addr, uint8_t mask, uint8_t val) {
 
 void Cmt2300aHal::set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIOPin *sclk,
                            esphome::InternalGPIOPin *csb, esphome::InternalGPIOPin *fcsb,
-                           esphome::InternalGPIOPin *gpio1) {
+                           esphome::InternalGPIOPin *gpio3) {
   // Keep the pin objects for setup()/pin_mode at init, and snapshot fast
   // ISR-safe handles for the bit-bang inner loop (non-virtual access).
   sdio_pin_ = sdio;
   sclk_pin_ = sclk;
   csb_pin_ = csb;
   fcsb_pin_ = fcsb;
-  gpio1_pin_ = gpio1;
+  gpio3_pin_ = gpio3;
   sdio_ = sdio->to_isr();
   sclk_ = sclk->to_isr();
   csb_ = csb->to_isr();
   fcsb_ = fcsb->to_isr();
-  gpio1_ = gpio1->to_isr();
+  gpio3_ = gpio3->to_isr();
 }
 
 /* ================================================================
@@ -191,12 +191,12 @@ bool Cmt2300aHal::init() {
   csb_pin_->setup();
   fcsb_pin_->setup();
   sdio_pin_->setup();
-  gpio1_pin_->setup();
+  gpio3_pin_->setup();
   sclk_.pin_mode(gpio::FLAG_OUTPUT);
   csb_.pin_mode(gpio::FLAG_OUTPUT);
   fcsb_.pin_mode(gpio::FLAG_OUTPUT);
   sdio_.pin_mode(gpio::FLAG_OUTPUT);
-  gpio1_.pin_mode(gpio::FLAG_INPUT);
+  gpio3_.pin_mode(gpio::FLAG_INPUT);
 
   // Idle state: both CS lines high, clock low
   pin_high(csb_);
@@ -280,33 +280,27 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // REG_PKT29 (0x54): (reg & 0xE0) | 0x0C
   update_reg(REG_PKT29, MASK_FIFO_TH, FIFO_TH_VALUE);
 
-  // Route ALL exposed GPIOs to INT2. On these breakout modules the "NIRQ" pad
-  // (chip GPIO1/GPIO2) and the "GPIO3" pad are commonly tied to one net; if we
-  // drove INT1 on one and INT2 on the other we'd have two push-pull outputs
-  // fighting on the shared net. Driving every pin from the SAME INT2 signal
-  // means they always output the identical level — no contention — and
-  // whichever pad you wire to pin_gpio1 carries it.
-  //   GPIO1 = INT2 (0x02), GPIO2 = INT2 (0x04), GPIO3 = INT2 (0x20)
-  update_reg(REG_IO_SEL, MASK_GPIO1_SEL | MASK_GPIO2_SEL | MASK_GPIO3_SEL,
-             GPIO1_SEL_INT2 | GPIO2_SEL_INT2 | GPIO3_SEL_INT2);
+  // Route the GPIO3 pad to INT2 — this is the only interrupt pad we wire to the
+  // ESP32. INT2 carries the live FIFO-threshold signal we poll (TX_FIFO_TH during
+  // TX, RX_FIFO_TH during RX); GPIO3 = INT2 (0x20). GPIO1/GPIO2 are left at their
+  // POR defaults (unconnected on our board).
+  update_reg(REG_IO_SEL, MASK_GPIO3_SEL, GPIO3_SEL_INT2);
 
-  // INT2 source = PKT_DONE, ACTIVE-HIGH polarity. The firmware uses active
+  // INT2 source = RX_FIFO_TH, ACTIVE-HIGH polarity. The firmware uses active
   // high (it preserves the POR-default polar bit = 0 and reads "pin HIGH =
   // event"); SETTING the polar bit makes the line active-LOW (idle-high),
   // which falsely reads as "packet done" every poll. So clear it (= 0).
-  // set_int1_source() updates both INT1_CTL and INT2_CTL, so the live signal
-  // (TX_FIFO_TH during TX, RX_FIFO_TH during RX) always lands on INT2/GPIO3.
-  // Default to RX_FIFO_TH, matching the firmware (cmt_post_config: INT2=0x0C).
+  // The live signal (TX_FIFO_TH during TX, RX_FIFO_TH during RX) lands on
+  // INT2 → the GPIO3 pad we poll. Default to RX_FIFO_TH, matching the firmware
+  // (cmt_post_config: INT2=0x0C).
   update_reg(REG_INT2_CTL, MASK_INT2_SEL, INT_SEL_RX_FIFO_TH);
   update_reg(REG_INT2_CTL, MASK_INT_POLAR, 0x00);
-  update_reg(REG_INT1_CTL, MASK_INT1_SEL, INT_SEL_RX_FIFO_TH);
-  update_reg(REG_INT1_CTL, MASK_INT_POLAR, 0x00);
 
   // Enable PKT_DONE + TX_DONE latched interrupts (FIFO_TH on the GPIO follows
   // the INT mux regardless of INT_EN).
   write_reg(REG_INT_EN, INT_EN_PKT_DONE | INT_EN_TX_DONE);
 
-  ESP_LOGD(TAG, "Runtime overrides applied (FIFO merge=64B; GPIO1/2/3 -> INT2, active-high, RX_FIFO_TH)");
+  ESP_LOGD(TAG, "Runtime overrides applied (FIFO merge=64B; GPIO3 -> INT2, active-high, RX_FIFO_TH)");
 }
 
 /* ================================================================
@@ -524,7 +518,7 @@ uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
 
 bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   // Matching firmware cmt_tx_chunked_write (0x131B8): fill FIFO with first 64B, enter TX,
-  // then poll TX_FIFO_TH via GPIO1 to refill remaining data in 15-byte chunks.
+  // then poll TX_FIFO_TH via the GPIO3/INT2 pin to refill remaining data in 15-byte chunks.
 
   if (!go_standby()) return false;
 
@@ -543,7 +537,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   write_reg(REG_FIFO_CLR, FIFO_RESTORE | FIFO_CLR_RX | FIFO_CLR_TX);
 
   // Configure INT1 = TX_FIFO_TH (fires when FIFO drops below threshold)
-  set_int1_source(INT_SEL_TX_FIFO_TH);
+  set_int_source(INT_SEL_TX_FIFO_TH);
 
   // Write first chunk (up to 64 bytes)
   size_t initial = (len > FIFO_SIZE_MERGED) ? FIFO_SIZE_MERGED : len;
@@ -574,8 +568,8 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
       return true;
     }
 
-    // If more data to write, check if FIFO needs refill via GPIO1 (TX_FIFO_TH)
-    if (written < len && pin_read(gpio1_)) {
+    // If more data to write, check if FIFO needs refill via GPIO3 (TX_FIFO_TH)
+    if (written < len && pin_read(gpio3_)) {
       size_t remaining = len - written;
       size_t chunk = (remaining > TX_REFILL_CHUNK) ? TX_REFILL_CHUNK : remaining;
       spi_write_fifo(data + written, chunk);
@@ -641,17 +635,17 @@ uint8_t Cmt2300aHal::get_fifo_flags() {
   return spi_read_reg(REG_FIFO_FLAG);
 }
 
-bool Cmt2300aHal::read_gpio1() {
-  return pin_read(gpio1_);
+bool Cmt2300aHal::read_gpio3() {
+  return pin_read(gpio3_);
 }
 
-bool Cmt2300aHal::test_gpio1_wiring() {
-  // INT1 = RX_ACTIVE → pin is high only while the chip sits in RX state.
-  set_int1_source(INT_SEL_RX_ACTIVE);
+bool Cmt2300aHal::test_gpio3_wiring() {
+  // INT2 = RX_ACTIVE → pin is high only while the chip sits in RX state.
+  set_int_source(INT_SEL_RX_ACTIVE);
 
   go_standby();
   esphome::delayMicroseconds(300);
-  bool in_stby = pin_read(gpio1_);
+  bool in_stby = pin_read(gpio3_);
 
   // Enter RX (STBY → RFS → RX) and sample the pin.
   spi_write_reg(REG_MODE_CTL, GO_RFS);
@@ -659,18 +653,18 @@ bool Cmt2300aHal::test_gpio1_wiring() {
   spi_write_reg(REG_MODE_CTL, GO_RX);
   wait_for_state(STA_RX);
   esphome::delayMicroseconds(300);
-  bool in_rx = pin_read(gpio1_);
+  bool in_rx = pin_read(gpio3_);
 
   // Restore: standby + INT source back to RX_FIFO_TH for normal operation.
   go_standby();
-  set_int1_source(INT_SEL_RX_FIFO_TH);
+  set_int_source(INT_SEL_RX_FIFO_TH);
 
   bool ok = (!in_stby && in_rx);
   if (ok) {
-    ESP_LOGI(TAG, "GPIO1 wiring OK: pin LOW in STBY, HIGH in RX (NIRQ→pin_gpio1 good)");
+    ESP_LOGI(TAG, "GPIO3 wiring OK: pin LOW in STBY, HIGH in RX (INT2→pin_gpio3 good)");
   } else {
-    ESP_LOGE(TAG, "GPIO1 wiring FAIL: STBY=%d RX=%d (expected 0 then 1). "
-                  "Check NIRQ is wired to pin_gpio1 — RX cannot work otherwise.",
+    ESP_LOGE(TAG, "GPIO3 wiring FAIL: STBY=%d RX=%d (expected 0 then 1). "
+                  "Check the chip's GPIO3 pad is wired to pin_gpio3 — RX cannot work otherwise.",
              in_stby, in_rx);
   }
   return ok;
@@ -680,12 +674,9 @@ bool Cmt2300aHal::test_gpio1_wiring() {
  * Chunked RX — for packets larger than 64-byte FIFO
  * ================================================================ */
 
-void Cmt2300aHal::set_int1_source(uint8_t source) {
-  // Drive the SAME source onto BOTH INT1 and INT2 (preserving each polarity
-  // bit). INT1 surfaces on GPIO1/GPIO2 (the module's NIRQ pin) and INT2 on
-  // GPIO3 — so whichever of those the user wired to pin_gpio1 carries the
-  // signal we poll (TX_FIFO_TH during TX, PKT_DONE during RX).
-  update_reg(REG_INT1_CTL, MASK_INT1_SEL, source & MASK_INT1_SEL);
+void Cmt2300aHal::set_int_source(uint8_t source) {
+  // INT2 surfaces on the GPIO3 pad — the line we poll (TX_FIFO_TH during TX,
+  // RX_FIFO_TH during RX). Preserves the polarity bit.
   update_reg(REG_INT2_CTL, MASK_INT2_SEL, source & MASK_INT2_SEL);
 }
 
@@ -701,15 +692,15 @@ void Cmt2300aHal::prepare_rx_session() {
 
 size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
   // RX_FIFO_TH-driven chunk drain — the firmware's mechanism. INT2 (=RX_FIFO_TH)
-  // surfaces on the GPIO pin and is HIGH while >= FIFO_TH_VALUE bytes sit in the
-  // RX FIFO. We poll that pin (the firmware reads the chip's INT output pins via
+  // surfaces on the GPIO3 pin and is HIGH while >= FIFO_TH_VALUE bytes sit in the
+  // RX FIFO. We poll that pin (the firmware reads the chip's INT output pin via
   // MCU GPIO too; the SPI status regs 0x6D/0x6E read 0xFF here — Control2 bank —
   // so they're unusable). Drain full threshold chunks while the line is asserted.
   //
   // The trailing < FIFO_TH_VALUE bytes of a frame never raise RX_FIFO_TH; the
   // caller (poll_rx_) reads that tail by frame length once it has arrived.
   size_t total = 0;
-  while (total + FIFO_TH_VALUE <= buf_size && pin_read(gpio1_)) {
+  while (total + FIFO_TH_VALUE <= buf_size && pin_read(gpio3_)) {
     spi_read_fifo(buf + total, FIFO_TH_VALUE);
     total += FIFO_TH_VALUE;
   }

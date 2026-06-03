@@ -30,16 +30,16 @@ void NartisRfMeterComponent::setup_continue_() {
   ESP_LOGI(TAG, "Setting up Nartis RF Meter...");
 
   // Initialize HAL
-  hal_.set_pins(pin_sdio_, pin_sclk_, pin_csb_, pin_fcsb_, pin_gpio1_);
+  hal_.set_pins(pin_sdio_, pin_sclk_, pin_csb_, pin_fcsb_, pin_gpio3_);
   if (!hal_.init()) {
     ESP_LOGE(TAG, "CMT2300A initialization failed!");
     this->mark_failed();
     return;
   }
 
-  // One-time GPIO1/NIRQ wiring self-test (decisive: RX is impossible if the
-  // chip's interrupt line isn't reaching the configured pin_gpio1).
-  hal_.test_gpio1_wiring();
+  // One-time GPIO3/INT2 wiring self-test (decisive: RX is impossible if the
+  // chip's interrupt line isn't reaching the configured pin_gpio3).
+  hal_.test_gpio3_wiring();
 
   // Passive sniff mode: no addressing, no keys, no DLMS. Park on the chosen
   // frequency bank, arm RX, and dump whatever arrives as raw hex.
@@ -74,9 +74,9 @@ void NartisRfMeterComponent::setup_continue_() {
 
 void NartisRfMeterComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Nartis RF Meter:");
-  ESP_LOGCONFIG(TAG, "  Pins: SDIO=%d, SCLK=%d, CSB=%d, FCSB=%d, GPIO1=%d",
+  ESP_LOGCONFIG(TAG, "  Pins: SDIO=%d, SCLK=%d, CSB=%d, FCSB=%d, GPIO3=%d",
                 pin_sdio_->get_pin(), pin_sclk_->get_pin(), pin_csb_->get_pin(),
-                pin_fcsb_->get_pin(), pin_gpio1_->get_pin());
+                pin_fcsb_->get_pin(), pin_gpio3_->get_pin());
   ESP_LOGCONFIG(TAG, "  Address: device_id=0x%04X, serial_hash=0x%08X, group=%d, type=%d",
                 address_.device_id, (unsigned) address_.serial_hash,
                 address_.group_id, address_.device_type);
@@ -968,7 +968,7 @@ void NartisRfMeterComponent::start_rx_() {
   // goes HIGH while >= FIFO_TH_VALUE bytes await in the RX FIFO; we drain
   // threshold chunks on that, and read the trailing sub-threshold bytes by
   // frame length. (TX left it on TX_FIFO_TH; this restores it for RX.)
-  hal_.set_int1_source(INT_SEL_RX_FIFO_TH);
+  hal_.set_int_source(INT_SEL_RX_FIFO_TH);
   rx_tail_wait_ms_ = 0;
 
   // Enter RX mode: STBY → RFS → RX
@@ -977,7 +977,7 @@ void NartisRfMeterComponent::start_rx_() {
   hal_.write_reg(REG_MODE_CTL, GO_RX);
   hal_.wait_for_state(STA_RX);
 
-  ESP_LOGD(TAG, "RX started (GPIO1/PKT_DONE polled, 4800 bps)");
+  ESP_LOGD(TAG, "RX started (GPIO3/RX_FIFO_TH polled, 4800 bps)");
 }
 
 NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {

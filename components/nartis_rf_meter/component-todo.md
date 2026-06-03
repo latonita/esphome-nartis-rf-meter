@@ -37,5 +37,5 @@ Gaps between our ESPHome component and the original firmware.
 ## Verified OK (firmware differences by design)
 
 - **FIFO threshold 12 vs firmware 15** — Our ISR reads `FIFO_TH_VALUE` (12) bytes per chunk. Self-consistent with `FifoChunk` buffer size. Just more frequent ISR calls. Not a bug.
-- **INT_EN 0x21 vs firmware 0x39** — We don't use PREAM_OK/SYNC_OK flags. INT_EN doesn't gate INT1 pin source (FIFO events fire regardless).
-- **GPIO1=INT1 vs firmware GPIO3=INT1** — Different hardware wiring (ESP32 vs HT6027). Same logical function.
+- **INT_EN 0x21 vs firmware 0x39** — We don't use PREAM_OK/SYNC_OK flags. INT_EN doesn't gate the GPIO's FIFO_TH source (FIFO_TH is an auto-clearing level that fires regardless).
+- **GPIO3=INT2 interrupt pin** — The chip's GPIO3 pad can only output INT2 (not INT1), so we mux INT2 to the FIFO-threshold signal and poll the GPIO3 pin, matching the firmware (cmt_post_config: INT2=RX_FIFO_TH).

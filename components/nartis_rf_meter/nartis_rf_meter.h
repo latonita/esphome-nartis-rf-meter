@@ -54,7 +54,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void set_pin_sclk(esphome::InternalGPIOPin *p) { pin_sclk_ = p; }
   void set_pin_csb(esphome::InternalGPIOPin *p) { pin_csb_ = p; }
   void set_pin_fcsb(esphome::InternalGPIOPin *p) { pin_fcsb_ = p; }
-  void set_pin_gpio1(esphome::InternalGPIOPin *p) { pin_gpio1_ = p; }
+  void set_pin_gpio3(esphome::InternalGPIOPin *p) { pin_gpio3_ = p; }
 
   /// Set the 12-digit meter serial (printed on the meter nameplate).
   void set_meter_serial(const std::string &s);
@@ -179,7 +179,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   esphome::InternalGPIOPin *pin_sclk_{nullptr};
   esphome::InternalGPIOPin *pin_csb_{nullptr};
   esphome::InternalGPIOPin *pin_fcsb_{nullptr};
-  esphome::InternalGPIOPin *pin_gpio1_{nullptr};
+  esphome::InternalGPIOPin *pin_gpio3_{nullptr};
   std::string meter_serial_;
   std::string ciu_serial_;  // empty = use ESP32 MAC address
   std::string ciu_address_; // optional 16-hex-char full CIU address override

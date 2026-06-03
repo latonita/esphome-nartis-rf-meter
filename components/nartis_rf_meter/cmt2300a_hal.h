@@ -9,18 +9,24 @@
  *   SCLK  — serial clock
  *   CSB   — chip select for register access (active low)
  *   FCSB  — chip select for FIFO access (active low)
- *   GPIO1 — radio status output (unused: we poll via SPI, matching the
- *           original CIU firmware which is also fully polled)
+ *   GPIO3 — chip interrupt output, routed to INT2. Carries the FIFO-threshold
+ *           level we poll (RX_FIFO_TH in RX, TX_FIFO_TH in TX). On this chip
+ *           GPIO3 can only output INT2 (not INT1), which is why INT2 is used.
  *
- * FIFO reception:
- *   Polling-based. The component's main loop calls poll_rx_drain() each
- *   iteration; it reads REG_FIFO_FLAG via SPI and drains whatever is
- *   available — a full FIFO_TH_VALUE-byte chunk in one burst when the
- *   RX_FIFO_TH flag is set, or byte-by-byte for the packet tail.
+ * FIFO reception (polling, no ISR):
+ *   The component's main loop calls poll_rx_drain() each iteration. It polls
+ *   the GPIO3/INT2 line — HIGH while >= FIFO_TH_VALUE unread bytes sit in the
+ *   RX FIFO (RX_FIFO_TH, an auto-clearing level per the datasheet) — and burst-
+ *   reads a full FIFO_TH_VALUE chunk via SPI each time the line is asserted.
+ *   The trailing < FIFO_TH_VALUE bytes never raise RX_FIFO_TH, so the caller
+ *   reads that tail by frame length once it has arrived.
  *
- *   At the meter's 4800 bps on-air rate (~600 B/s), bytes trickle in
- *   one every ~1.7 ms, so the ESPHome loop() rate is more than fast
- *   enough to keep up. No GPIO interrupt is required.
+ *   We poll the physical pin rather than the SPI FIFO-flag register (0x6E):
+ *   that register reads 0xFF here (Control2 bank), so it is unusable — matching
+ *   the original CIU firmware, which also reads the chip's INT pin via MCU GPIO.
+ *
+ *   At the meter's 4800 bps on-air rate (~600 B/s), bytes trickle in one every
+ *   ~1.7 ms, so the ESPHome loop() rate keeps up without an interrupt handler.
  */
 
 #pragma once
@@ -41,7 +47,7 @@ class Cmt2300aHal {
   /// Set GPIO pins. Must be called before init().
   void set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIOPin *sclk,
                 esphome::InternalGPIOPin *csb, esphome::InternalGPIOPin *fcsb,
-                esphome::InternalGPIOPin *gpio1);
+                esphome::InternalGPIOPin *gpio3);
 
   /// Initialize the CMT2300A: soft reset, verify chip, write full register config.
   /// Returns true on success.
@@ -149,20 +155,20 @@ class Cmt2300aHal {
   /// Check FIFO flags register.
   uint8_t get_fifo_flags();
 
-  /// Read GPIO1 pin state (interrupt line).
-  bool read_gpio1();
+  /// Read GPIO3 pin state (interrupt line).
+  bool read_gpio3();
 
-  /// One-time wiring self-test for the NIRQ/GPIO1 line. Temporarily routes
-  /// INT1 = RX_ACTIVE (high only while the chip is in RX), reads the pin in
-  /// STBY (expect low) and in RX (expect high), then restores INT1 = PKT_DONE.
-  /// Returns true if the pin tracked the state (i.e. NIRQ is wired correctly
-  /// to the configured pin_gpio1). Logs the raw readings either way.
-  bool test_gpio1_wiring();
+  /// One-time wiring self-test for the GPIO3/INT2 line. Temporarily routes
+  /// INT2 = RX_ACTIVE (high only while the chip is in RX), reads the pin in
+  /// STBY (expect low) and in RX (expect high), then restores INT2 = RX_FIFO_TH.
+  /// Returns true if the pin tracked the state (i.e. the chip's GPIO3 pad is
+  /// wired correctly to the configured pin_gpio3). Logs the raw readings either way.
+  bool test_gpio3_wiring();
 
-  /// Set INT1 source field of REG_INT1_CTL. Used internally by the
-  /// TX-chunked path; harmless on the RX path since we no longer read
-  /// the GPIO1 line as an interrupt.
-  void set_int1_source(uint8_t source);
+  /// Set the INT2 source field of REG_INT2_CTL. INT2 is routed to the GPIO3
+  /// pad we poll for the FIFO-threshold signal (TX_FIFO_TH during TX,
+  /// RX_FIFO_TH during RX).
+  void set_int_source(uint8_t source);
 
   /* ---- Chunked RX (polling-based, no ISR) ---- */
 
@@ -241,13 +247,13 @@ class Cmt2300aHal {
   esphome::InternalGPIOPin *sclk_pin_{nullptr};
   esphome::InternalGPIOPin *csb_pin_{nullptr};
   esphome::InternalGPIOPin *fcsb_pin_{nullptr};
-  esphome::InternalGPIOPin *gpio1_pin_{nullptr};
+  esphome::InternalGPIOPin *gpio3_pin_{nullptr};
   // Fast non-virtual handles for the bit-bang inner loop (via pin->to_isr()).
   esphome::ISRInternalGPIOPin sdio_;
   esphome::ISRInternalGPIOPin sclk_;
   esphome::ISRInternalGPIOPin csb_;
   esphome::ISRInternalGPIOPin fcsb_;
-  esphome::ISRInternalGPIOPin gpio1_;
+  esphome::ISRInternalGPIOPin gpio3_;
 
   bool initialized_{false};
 };

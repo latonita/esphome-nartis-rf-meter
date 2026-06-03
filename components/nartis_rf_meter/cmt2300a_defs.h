@@ -268,24 +268,11 @@ static constexpr uint8_t MASK_SPI_FIFO_RD_WR_SEL = 0x01;
 /* ================================================================
  * IO_SEL Register (REG_IO_SEL = 0x65) — GPIO function mapping
  * ================================================================ */
-static constexpr uint8_t MASK_GPIO1_SEL = 0x03;
-static constexpr uint8_t MASK_GPIO2_SEL = 0x0C;
 static constexpr uint8_t MASK_GPIO3_SEL = 0x30;
-static constexpr uint8_t MASK_GPIO4_SEL = 0xC0;
 
-/* GPIO1 options */
-static constexpr uint8_t GPIO1_SEL_DOUT = 0x00;
-static constexpr uint8_t GPIO1_SEL_INT1 = 0x01;
-static constexpr uint8_t GPIO1_SEL_INT2 = 0x02;
-static constexpr uint8_t GPIO1_SEL_DCLK = 0x03;
-
-/* GPIO2 options */
-static constexpr uint8_t GPIO2_SEL_INT1 = 0x00;
-static constexpr uint8_t GPIO2_SEL_INT2 = 0x04;
-static constexpr uint8_t GPIO2_SEL_DOUT = 0x08;
-static constexpr uint8_t GPIO2_SEL_DCLK = 0x0C;
-
-/* GPIO3 options (NOTE: GPIO3 cannot output INT1 — only INT2/CLKO/DOUT/DCLK) */
+/* GPIO3 options (NOTE: GPIO3 cannot output INT1 — only INT2/CLKO/DOUT/DCLK).
+ * Our board wires only the chip's GPIO3 pad to the ESP32, so only GPIO3 is
+ * muxed (to INT2); the GPIO1/GPIO2 select fields are left at POR defaults. */
 static constexpr uint8_t GPIO3_SEL_CLKO = 0x00;
 static constexpr uint8_t GPIO3_SEL_DOUT = 0x10;
 static constexpr uint8_t GPIO3_SEL_INT2 = 0x20;

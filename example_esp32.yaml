@@ -54,7 +54,7 @@ external_components:
 #   SCLK (clock)  ->  GPIO18
 #   CSB  (reg CS)  -> GPIO5
 #   FCSB (FIFO CS) -> GPIO17
-#   GPIO1 (IRQ)    -> GPIO16
+#   GPIO3 (IRQ/INT2) -> GPIO34
 #   VDD            -> 3.3V
 #   GND            -> GND
 #
@@ -65,7 +65,7 @@ nartis_rf_meter:
   pin_sclk: GPIO18
   pin_csb: GPIO27
   pin_fcsb: GPIO26
-  pin_gpio1: GPIO34
+  pin_gpio3: GPIO34
   # Meter serial — the 12-digit number printed on the meter's nameplate
   # (e.g. "021245003137"). 
   meter_serial: "012345678901"
