@@ -59,6 +59,17 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// Set the 12-digit meter serial (printed on the meter nameplate).
   void set_meter_serial(const std::string &s);
   void set_ciu_serial(const std::string &s) { ciu_serial_ = s; }
+  /// Set the full 8-byte CIU RF address as 16 hex chars (e.g. "CD2C0000026B5025").
+  /// Overrides serial/MAC derivation — use to impersonate a paired CIU exactly.
+  void set_ciu_address(const std::string &hex) { ciu_address_ = hex; }
+
+  /// Enable passive sniff mode: the component never transmits. It parks the
+  /// radio in RX and dumps every received frame as raw hex. No address filter,
+  /// no CRC/AES — pure on-air bytes.
+  void set_sniff_mode(bool enable) { sniff_mode_ = enable; }
+  /// Frequency bank (0..3) to camp on while sniffing. Per the CIU firmware the
+  /// live link runs on channel 0 (RX freq 434.1026 MHz), so 0 is the default.
+  void set_sniff_channel(uint8_t ch) { sniff_channel_ = ch & 0x3; }
 
   /* ---- Sensor registration ---- */
   void register_sensor(esphome::sensor::Sensor *s, const ObisCode &obis,
@@ -70,6 +81,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   enum class State : uint8_t {
     NOT_INITIALIZED,
     IDLE,
+    // Passive sniff — never transmits; dumps every received frame as raw hex
+    SNIFF_LISTEN,
     // Channel scan
     RSSI_SCAN,
     CHANNEL_SELECT,
@@ -169,6 +182,9 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   esphome::InternalGPIOPin *pin_gpio1_{nullptr};
   std::string meter_serial_;
   std::string ciu_serial_;  // empty = use ESP32 MAC address
+  std::string ciu_address_; // optional 16-hex-char full CIU address override
+  bool sniff_mode_{false};  // passive listen-only mode (no TX, raw hex dump)
+  uint8_t sniff_channel_{0};// frequency bank to camp on while sniffing
   RfAddress address_{};
   uint8_t aes_key_[AES_KEY_SIZE]{};
 

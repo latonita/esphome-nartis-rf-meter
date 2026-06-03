@@ -17,6 +17,9 @@ CONF_PIN_GPIO1 = "pin_gpio1"
 CONF_PIN_GPIO3 = "pin_gpio3"
 CONF_METER_SERIAL = "meter_serial"
 CONF_CIU_SERIAL = "ciu_serial"
+CONF_CIU_ADDRESS = "ciu_address"
+CONF_SNIFF_MODE = "sniff_mode"
+CONF_SNIFF_CHANNEL = "sniff_channel"
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
@@ -33,6 +36,26 @@ def validate_meter_serial(value):
             f"nameplate, e.g. '012345678901'); got {len(s)} characters '{s}'"
         )
     return s
+
+
+def validate_ciu_address(value):
+    """Full 8-byte CIU RF address as 16 hex chars, e.g. 'CD2C0000026B5025'."""
+    s = cv.string_strict(value).replace(" ", "").replace(":", "")
+    if len(s) != 16 or any(c not in "0123456789abcdefABCDEF" for c in s):
+        raise cv.Invalid(
+            "ciu_address must be 8 bytes as 16 hex chars "
+            "(e.g. 'CD2C0000026B5025')"
+        )
+    return s.upper()
+
+
+def _require_meter_serial_unless_sniff(config):
+    """meter_serial is mandatory for active polling, but not for passive sniffing."""
+    if not config.get(CONF_SNIFF_MODE) and CONF_METER_SERIAL not in config:
+        raise cv.Invalid(
+            f"'{CONF_METER_SERIAL}' is required unless '{CONF_SNIFF_MODE}' is enabled"
+        )
+    return config
 
 
 CONFIG_SCHEMA = cv.All(
@@ -52,14 +75,26 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_PIN_GPIO1): pins.internal_gpio_input_pin_schema,
             cv.Optional(CONF_PIN_GPIO3): pins.internal_gpio_input_pin_schema,
             # Meter serial number (12 digits, printed on the meter nameplate).
-            cv.Required(CONF_METER_SERIAL): validate_meter_serial,
+            # Required for active polling; optional in sniff_mode (see validator below).
+            cv.Optional(CONF_METER_SERIAL): validate_meter_serial,
+            # Passive sniff mode: never transmit — just park the radio in RX and
+            # log every received frame as raw hex (no CRC/address/AES decoding).
+            cv.Optional(CONF_SNIFF_MODE, default=False): cv.boolean,
+            # Frequency bank (0..3) to camp on while sniffing. The live CIU↔meter
+            # link runs on channel 0 (RX 434.1026 MHz), so 0 is the default.
+            cv.Optional(CONF_SNIFF_CHANNEL, default=0): cv.int_range(min=0, max=3),
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
+            # Full CIU RF address override (16 hex chars). Use to impersonate the
+            # exact CIU a meter is already paired with — meters typically only
+            # answer their paired CIU's address. Overrides ciu_serial/MAC.
+            cv.Optional(CONF_CIU_ADDRESS): validate_ciu_address,
         }
     ).extend(cv.polling_component_schema("60s")),
     # Exactly one interrupt pin must be wired/declared.
     cv.has_exactly_one_key(CONF_PIN_GPIO1, CONF_PIN_GPIO3),
+    _require_meter_serial_unless_sniff,
 )
 
 
@@ -82,6 +117,13 @@ async def to_code(config):
     irq = await cg.gpio_pin_expression(irq_conf)
     cg.add(var.set_pin_gpio1(irq))
 
-    cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
+    if config[CONF_SNIFF_MODE]:
+        cg.add(var.set_sniff_mode(True))
+        cg.add(var.set_sniff_channel(config[CONF_SNIFF_CHANNEL]))
+
+    if CONF_METER_SERIAL in config:
+        cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
     if config[CONF_CIU_SERIAL]:
         cg.add(var.set_ciu_serial(config[CONF_CIU_SERIAL]))
+    if CONF_CIU_ADDRESS in config:
+        cg.add(var.set_ciu_address(config[CONF_CIU_ADDRESS]))

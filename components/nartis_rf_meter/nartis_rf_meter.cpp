@@ -41,6 +41,17 @@ void NartisRfMeterComponent::setup_continue_() {
   // chip's interrupt line isn't reaching the configured pin_gpio1).
   hal_.test_gpio1_wiring();
 
+  // Passive sniff mode: no addressing, no keys, no DLMS. Park on the chosen
+  // frequency bank, arm RX, and dump whatever arrives as raw hex.
+  if (sniff_mode_) {
+    hal_.set_frequency_channel(sniff_channel_);
+    ESP_LOGI(TAG, "PASSIVE SNIFF MODE — channel %d, RX only, raw hex dump (no decode)",
+             sniff_channel_);
+    start_rx_();
+    set_state_(State::SNIFF_LISTEN);
+    return;
+  }
+
   // Derive RF address from CIU serial (or ESP32 MAC)
   derive_rf_address_();
 
@@ -85,6 +96,9 @@ void NartisRfMeterComponent::dump_config() {
 }
 
 void NartisRfMeterComponent::update() {
+  if (sniff_mode_) {
+    return;  // passive listener — no poll cycle
+  }
   if (state_ == State::IDLE) {
     if (sensors_.empty()) {
       ESP_LOGW(TAG, "No sensors registered — skipping update");
@@ -155,6 +169,7 @@ static const LogString *state_to_str(NartisRfMeterComponent::State s) {
   switch (s) {
     case NartisRfMeterComponent::State::NOT_INITIALIZED: return LOG_STR("NOT_INITIALIZED");
     case NartisRfMeterComponent::State::IDLE: return LOG_STR("IDLE");
+    case NartisRfMeterComponent::State::SNIFF_LISTEN: return LOG_STR("SNIFF_LISTEN");
     case NartisRfMeterComponent::State::RSSI_SCAN: return LOG_STR("RSSI_SCAN");
     case NartisRfMeterComponent::State::CHANNEL_SELECT: return LOG_STR("CHANNEL_SELECT");
     case NartisRfMeterComponent::State::PAIR_PROBE_TX: return LOG_STR("PAIR_PROBE_TX");
@@ -190,6 +205,21 @@ void NartisRfMeterComponent::handle_state_() {
   uint32_t elapsed = esphome::millis() - state_entered_ms_;
 
   switch (state_) {
+    case State::SNIFF_LISTEN: {
+      RxStatus status = poll_rx_();
+      if (status == RxStatus::COMPLETE) {
+        ESP_LOGI(TAG, "SNIFF ch%d (%d bytes): %s", sniff_channel_, (int) rx_accum_len_,
+                 format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+      }
+      // On COMPLETE, ERROR (timeout/overflow), or a partial that never finished,
+      // re-arm RX and keep listening. IN_PROGRESS: leave the FIFO accumulating.
+      if (status != RxStatus::IN_PROGRESS) {
+        start_rx_();
+        state_entered_ms_ = esphome::millis();  // refresh timer without log spam
+      }
+      break;
+    }
+
     case State::RSSI_SCAN:
       handle_rssi_scan_();
       break;
@@ -803,6 +833,32 @@ int NartisRfMeterComponent::receive_frame_(uint8_t *payload_out, size_t max,
  * ================================================================ */
 
 void NartisRfMeterComponent::derive_rf_address_() {
+  // Explicit full CIU address wins (8 bytes as 16 hex chars). Use this to
+  // impersonate the exact CIU a meter is already paired to — a meter typically
+  // only answers its paired CIU's address, so a derived/MAC address is ignored.
+  if (ciu_address_.size() == 16) {
+    uint8_t b[8];
+    bool ok = true;
+    for (size_t i = 0; i < 8 && ok; i++) {
+      auto hexval = [&](char c, bool &good) -> uint8_t {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        good = false;
+        return 0;
+      };
+      b[i] = (hexval(ciu_address_[2 * i], ok) << 4) | hexval(ciu_address_[2 * i + 1], ok);
+    }
+    if (ok) {
+      address_ = RfAddress::from_bytes(b);
+      uint8_t out[8];
+      address_.to_bytes(out);
+      ESP_LOGI(TAG, "Using explicit CIU address: %s", format_hex_pretty(out, 8).c_str());
+      return;
+    }
+    ESP_LOGW(TAG, "Invalid ciu_address '%s' — falling back to derivation", ciu_address_.c_str());
+  }
+
   uint8_t mac[6];
   // ESPHome's get_mac_address_raw() works on ESP32, ESP8266, RP2040, etc.
   esphome::get_mac_address_raw(mac);
@@ -984,10 +1040,14 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
   // Check timeout
   if (elapsed > RX_TIMEOUT_MS_) {
-    ESP_LOGW(TAG, "RX timeout (%d/%d bytes received in %dms)",
-             (int) rx_accum_len_, (int) rx_expected_len_, (int) elapsed);
+    // In sniff mode an idle window (no bytes) is normal — don't warn on it.
     if (rx_accum_len_ > 0) {
+      ESP_LOGW(TAG, "RX timeout (%d/%d bytes received in %dms)",
+               (int) rx_accum_len_, (int) rx_expected_len_, (int) elapsed);
       ESP_LOGD(TAG, "RX partial: %s", format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+    } else if (!sniff_mode_) {
+      ESP_LOGW(TAG, "RX timeout (0/%d bytes received in %dms)",
+               (int) rx_expected_len_, (int) elapsed);
     }
     finish_rx_();
     return RxStatus::ERROR;
