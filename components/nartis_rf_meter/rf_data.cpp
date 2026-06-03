@@ -109,6 +109,11 @@ size_t RfDataLayer::crc_insert(uint8_t *buf, size_t body_size, size_t out_max) {
   if (body_size <= 126) {
     // Single CRC at end
     if (body_size + 2 > out_max) return 0;
+    // CRITICAL: the firmware (crc_block_insert @0xB9B2) sets the length byte
+    // (buf[0] += 2) BEFORE computing the CRC, so the CRC covers the final
+    // length-1 value. Set it first here too, otherwise the CRC is computed over
+    // buf[0]==0 and every TX frame fails the meter's CRC check.
+    buf[RF_TX_LENGTH] = static_cast<uint8_t>((body_size + 2) - 1);
     uint16_t crc = crc16_calc(buf, body_size);
     buf[body_size]     = static_cast<uint8_t>(crc >> 8);
     buf[body_size + 1] = static_cast<uint8_t>(crc & 0xFF);
@@ -116,12 +121,14 @@ size_t RfDataLayer::crc_insert(uint8_t *buf, size_t body_size, size_t out_max) {
   } else {
     // Dual CRC mode
     if (body_size + 4 > out_max) return 0;
+    // Length byte covers the final frame (firmware: buf[0] += 4) — set before CRC1.
+    buf[RF_TX_LENGTH] = static_cast<uint8_t>((body_size + 4) - 1);
     // Shift bytes [0x7E..body_size-1] right by 2 to make room for CRC1.
     // Use memmove for overlapping region.
     size_t tail_size = body_size - CRC1_OFFSET;
     memmove(buf + CRC1_OFFSET + 2, buf + CRC1_OFFSET, tail_size);
 
-    // CRC1 over [0..0x7D]
+    // CRC1 over [0..0x7D] (includes the length byte set above)
     uint16_t crc1 = crc16_calc(buf, CRC1_OFFSET);
     buf[CRC1_OFFSET]     = static_cast<uint8_t>(crc1 >> 8);
     buf[CRC1_OFFSET + 1] = static_cast<uint8_t>(crc1 & 0xFF);
