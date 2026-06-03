@@ -81,6 +81,11 @@ void NartisRfMeterComponent::dump_config() {
                 address_.device_id, (unsigned) address_.serial_hash,
                 address_.group_id, address_.device_type);
   ESP_LOGCONFIG(TAG, "  DLMS: client=%d, server=%d", CLIENT_ADDRESS_, SERVER_ADDRESS_);
+  if (fix_channel_ >= 0) {
+    ESP_LOGCONFIG(TAG, "  Channel: fixed %d (RSSI auto-scan disabled)", fix_channel_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Channel: RSSI auto-scan");
+  }
   ESP_LOGCONFIG(TAG, "  Sensors: %d registered", (int) sensors_.size());
 
   for (size_t i = 0; i < sensors_.size(); i++) {
@@ -107,7 +112,8 @@ void NartisRfMeterComponent::update() {
     ESP_LOGI(TAG, "Starting meter read cycle...");
     current_sensor_idx_ = 0;
     retry_count_ = 0;
-    set_state_(State::RSSI_SCAN);
+    // With a pinned channel, skip the RSSI scan and go straight to channel setup.
+    set_state_(fix_channel_ >= 0 ? State::CHANNEL_SELECT : State::RSSI_SCAN);
   } else {
     ESP_LOGD(TAG, "Update skipped — state machine busy (state=%d)", static_cast<int>(state_));
   }
@@ -467,10 +473,18 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 }
 
 void NartisRfMeterComponent::handle_channel_select_() {
-  uint8_t best = RfDataLayer::select_best_channel(rssi_readings_);
-  rf_.set_channel(best);
-  hal_.set_frequency_channel(best);
-  ESP_LOGI(TAG, "Selected channel %d (RSSI: %d dBm)", best, rssi_readings_[best]);
+  uint8_t best;
+  if (fix_channel_ >= 0) {
+    best = static_cast<uint8_t>(fix_channel_);
+    rf_.set_channel(best);
+    hal_.set_frequency_channel(best);
+    ESP_LOGI(TAG, "Using fixed channel %d (RSSI scan skipped)", best);
+  } else {
+    best = RfDataLayer::select_best_channel(rssi_readings_);
+    rf_.set_channel(best);
+    hal_.set_frequency_channel(best);
+    ESP_LOGI(TAG, "Selected channel %d (RSSI: %d dBm)", best, rssi_readings_[best]);
+  }
   // First contact requires the pairing handshake; once paired this boot we
   // go straight to the beacon/poll cycle.
   if (paired_) {

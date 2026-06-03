@@ -19,6 +19,7 @@ CONF_CIU_SERIAL = "ciu_serial"
 CONF_CIU_ADDRESS = "ciu_address"
 CONF_SNIFF_MODE = "sniff_mode"
 CONF_SNIFF_CHANNEL = "sniff_channel"
+CONF_FIX_CHANNEL = "fix_channel"
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
@@ -80,6 +81,10 @@ CONFIG_SCHEMA = cv.All(
             # Frequency bank (0..3) to camp on while sniffing. The live CIU↔meter
             # link runs on channel 0 (RX 434.1026 MHz), so 0 is the default.
             cv.Optional(CONF_SNIFF_CHANNEL, default=0): cv.int_range(min=0, max=3),
+            # Pin the active-mode physical channel (0..3), bypassing the RSSI
+            # auto-scan. Omit for auto-select. Use fix_channel: 0 to match the
+            # firmware, which runs the live link on channel 0.
+            cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=0, max=3),
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
@@ -114,6 +119,9 @@ async def to_code(config):
     if config[CONF_SNIFF_MODE]:
         cg.add(var.set_sniff_mode(True))
         cg.add(var.set_sniff_channel(config[CONF_SNIFF_CHANNEL]))
+
+    if CONF_FIX_CHANNEL in config:
+        cg.add(var.set_fix_channel(config[CONF_FIX_CHANNEL]))
 
     if CONF_METER_SERIAL in config:
         cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))

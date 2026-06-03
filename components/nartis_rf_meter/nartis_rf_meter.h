@@ -71,6 +71,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// live link runs on channel 0 (RX freq 434.1026 MHz), so 0 is the default.
   void set_sniff_channel(uint8_t ch) { sniff_channel_ = ch & 0x3; }
 
+  /// Pin the active-mode physical channel (0..3), bypassing the RSSI auto-scan.
+  /// The firmware transmits/listens on a fixed bank (channel 0) and only encodes
+  /// the scanned index as a frame hint, so forcing the channel here is the lever
+  /// to match the meter when auto-select tunes to the wrong frequency.
+  void set_fix_channel(uint8_t ch) { fix_channel_ = static_cast<int8_t>(ch & 0x3); }
+
   /* ---- Sensor registration ---- */
   void register_sensor(esphome::sensor::Sensor *s, const ObisCode &obis,
                        uint16_t class_id, uint8_t attr_id);
@@ -185,6 +191,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   std::string ciu_address_; // optional 16-hex-char full CIU address override
   bool sniff_mode_{false};  // passive listen-only mode (no TX, raw hex dump)
   uint8_t sniff_channel_{0};// frequency bank to camp on while sniffing
+  int8_t fix_channel_{-1};  // active-mode pinned channel (0..3); -1 = RSSI auto-scan
   RfAddress address_{};
   uint8_t aes_key_[AES_KEY_SIZE]{};
 
