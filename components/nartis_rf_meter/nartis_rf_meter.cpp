@@ -473,18 +473,26 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 }
 
 void NartisRfMeterComponent::handle_channel_select_() {
-  uint8_t best;
-  if (fix_channel_ >= 0) {
-    best = static_cast<uint8_t>(fix_channel_);
-    rf_.set_channel(best);
-    hal_.set_frequency_channel(best);
-    ESP_LOGI(TAG, "Using fixed channel %d (RSSI scan skipped)", best);
-  } else {
-    best = RfDataLayer::select_best_channel(rssi_readings_);
-    rf_.set_channel(best);
-    hal_.set_frequency_channel(best);
-    ESP_LOGI(TAG, "Selected channel %d (RSSI: %d dBm)", best, rssi_readings_[best]);
-  }
+  // The on-air channel_byte ADVERTISES a channel index + link quality; it is
+  // separate from the PHYSICAL frequency bank the radio sits on. The firmware
+  // advertises the RSSI-ranked channel (always 1..3 — rssi_channel_select never
+  // returns 0) and physically transmits on a fixed bank regardless. We mirror
+  // that by decoupling the two here.
+  //
+  // When the RSSI scan was skipped (fix_channel pinned), rssi_readings_ are all
+  // zero → select_best_channel() returns 1 and quality maps to 62, i.e. the exact
+  // first-probe advertisement seen on real hardware (channel_byte = 0x7E).
+  uint8_t adv_ch = RfDataLayer::select_best_channel(rssi_readings_);  // 1..3, never 0
+  int8_t  adv_rssi = rssi_readings_[adv_ch];
+  rf_.set_channel_quality(adv_ch, adv_rssi);
+
+  // Physical channel: pinned by fix_channel, else follow the advertised pick.
+  uint8_t phys_ch = (fix_channel_ >= 0) ? static_cast<uint8_t>(fix_channel_) : adv_ch;
+  hal_.set_frequency_channel(phys_ch);
+
+  ESP_LOGI(TAG, "Channel: physical %d%s, advertising ch%d (quality from %d dBm)",
+           phys_ch, (fix_channel_ >= 0) ? " (fixed)" : "", adv_ch, adv_rssi);
+
   // First contact requires the pairing handshake; once paired this boot we
   // go straight to the beacon/poll cycle.
   if (paired_) {
