@@ -20,6 +20,8 @@ CONF_CIU_ADDRESS = "ciu_address"
 CONF_SNIFF_MODE = "sniff_mode"
 CONF_SNIFF_CHANNEL = "sniff_channel"
 CONF_FIX_CHANNEL = "fix_channel"
+CONF_TX_TEST_MODE = "tx_test_mode"
+CONF_PAIRING_DELAY = "pairing_delay"
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
@@ -50,10 +52,20 @@ def validate_ciu_address(value):
 
 
 def _require_meter_serial_unless_sniff(config):
-    """meter_serial is mandatory for active polling, but not for passive sniffing."""
-    if not config.get(CONF_SNIFF_MODE) and CONF_METER_SERIAL not in config:
+    """meter_serial is mandatory for active polling, but not for passive sniffing
+    or the RF TX test (which only needs to put a carrier on air)."""
+    if (
+        not config.get(CONF_SNIFF_MODE)
+        and not config.get(CONF_TX_TEST_MODE)
+        and CONF_METER_SERIAL not in config
+    ):
         raise cv.Invalid(
-            f"'{CONF_METER_SERIAL}' is required unless '{CONF_SNIFF_MODE}' is enabled"
+            f"'{CONF_METER_SERIAL}' is required unless '{CONF_SNIFF_MODE}' or "
+            f"'{CONF_TX_TEST_MODE}' is enabled"
+        )
+    if config.get(CONF_SNIFF_MODE) and config.get(CONF_TX_TEST_MODE):
+        raise cv.Invalid(
+            f"'{CONF_SNIFF_MODE}' and '{CONF_TX_TEST_MODE}' are mutually exclusive"
         )
     return config
 
@@ -85,6 +97,15 @@ CONFIG_SCHEMA = cv.All(
             # auto-scan. Omit for auto-select. Use fix_channel: 0 to match the
             # firmware, which runs the live link on channel 0.
             cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=0, max=3),
+            # RF TX test: transmit probe frames continuously (until reflashed) so
+            # an SDR can confirm the radio is emitting on the expected frequency.
+            # Honours fix_channel for the physical channel (default 0 ~431.23 MHz).
+            cv.Optional(CONF_TX_TEST_MODE, default=False): cv.boolean,
+            # Delay before the single pairing attempt fires (with a 3-2-1 countdown
+            # logged), giving time to arm an air capture. One-shot: no auto-retry.
+            cv.Optional(
+                CONF_PAIRING_DELAY, default="15s"
+            ): cv.positive_time_period_milliseconds,
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
@@ -122,6 +143,11 @@ async def to_code(config):
 
     if CONF_FIX_CHANNEL in config:
         cg.add(var.set_fix_channel(config[CONF_FIX_CHANNEL]))
+
+    if config[CONF_TX_TEST_MODE]:
+        cg.add(var.set_tx_test_mode(True))
+
+    cg.add(var.set_pairing_delay_ms(config[CONF_PAIRING_DELAY]))
 
     if CONF_METER_SERIAL in config:
         cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))

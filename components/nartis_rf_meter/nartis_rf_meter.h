@@ -77,6 +77,15 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// to match the meter when auto-select tunes to the wrong frequency.
   void set_fix_channel(uint8_t ch) { fix_channel_ = static_cast<int8_t>(ch & 0x3); }
 
+  /// TX test mode: continuously transmit the probe frame back-to-back (no RX,
+  /// no state machine) until the device is reflashed. Use with an SDR to confirm
+  /// the radio is actually emitting on the expected frequency (Ch0 ≈ 431.23 MHz).
+  void set_tx_test_mode(bool enable) { tx_test_mode_ = enable; }
+
+  /// Delay (ms) from setup completion to the single pairing attempt. A 3-2-1
+  /// countdown is logged before it fires so you can start an air capture in time.
+  void set_pairing_delay_ms(uint32_t ms) { pairing_delay_ms_ = ms; }
+
   /* ---- Sensor registration ---- */
   void register_sensor(esphome::sensor::Sensor *s, const ObisCode &obis,
                        uint16_t class_id, uint8_t attr_id);
@@ -89,6 +98,10 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     IDLE,
     // Passive sniff — never transmits; dumps every received frame as raw hex
     SNIFF_LISTEN,
+    // TX test — transmits the probe frame back-to-back forever (RF presence check)
+    TX_TEST,
+    // Terminal stop — pairing failed; radio asleep, no further TX (reboot to retry)
+    STOPPED,
     // Channel scan
     RSSI_SCAN,
     CHANNEL_SELECT,
@@ -125,6 +138,11 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void setup_continue_();
   void set_state_(State new_state);
   void handle_state_();
+
+  /// Kick off a single pairing/read cycle (called once ~1s after setup).
+  void start_cycle_();
+  /// Enter the terminal STOPPED state: sleep the radio, cease all TX. Reboot to retry.
+  void stop_(const char *reason);
 
   // State handlers
   void handle_rssi_scan_();
@@ -192,6 +210,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   bool sniff_mode_{false};  // passive listen-only mode (no TX, raw hex dump)
   uint8_t sniff_channel_{0};// frequency bank to camp on while sniffing
   int8_t fix_channel_{-1};  // active-mode pinned channel (0..3); -1 = RSSI auto-scan
+  bool tx_test_mode_{false};// continuous probe TX for SDR/RF verification
+  uint32_t pairing_delay_ms_{15000};  // delay from setup to the one-shot pairing attempt
   RfAddress address_{};
   uint8_t aes_key_[AES_KEY_SIZE]{};
 
@@ -199,8 +219,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   static constexpr const char *PASSWORD_ = "123456";  // local pairing PIN, not sent over RF
   static constexpr uint16_t CLIENT_ADDRESS_ = 16;
   static constexpr uint16_t SERVER_ADDRESS_ = 1;
-  static constexpr uint32_t RX_TIMEOUT_MS_ = 2000;
+  static constexpr uint32_t RX_TIMEOUT_MS_ = 3000;
   static constexpr uint8_t MAX_RETRIES_ = 3;
+  // Pairing-step pacing — the real CIU waits ~5–6 s between pairing TX steps,
+  // both for retries and after receiving the meter's response. Mirroring this
+  // avoids stomping the meter while it processes the previous frame.
+  static constexpr uint32_t PAIR_STEP_DELAY_MS_ = 5500;
 
   /* ---- Runtime state ---- */
   State state_{State::NOT_INITIALIZED};

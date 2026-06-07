@@ -22,8 +22,8 @@ static const char *const TAG = "nartis_rf_meter";
  * ================================================================ */
 
 void NartisRfMeterComponent::setup() {
-  ESP_LOGI(TAG, "Nartis RF Meter: deferring init 10s for network log viewers...");
-  this->set_timeout(10000, [this]() { this->setup_continue_(); });
+  ESP_LOGI(TAG, "Nartis RF Meter: deferring init 2s for network log viewers...");
+  this->set_timeout(2000, [this]() { this->setup_continue_(); });
 }
 
 void NartisRfMeterComponent::setup_continue_() {
@@ -62,7 +62,24 @@ void NartisRfMeterComponent::setup_continue_() {
   // Configure DLMS client
   dlms_.set_credentials(PASSWORD_, CLIENT_ADDRESS_, SERVER_ADDRESS_);
 
-  // Start in IDLE
+  // TX test mode: park on the chosen channel and transmit forever. Address/key
+  // are already configured above so the test frame is a real, decodable probe.
+  if (tx_test_mode_) {
+    uint8_t ch = (fix_channel_ >= 0) ? static_cast<uint8_t>(fix_channel_) : 0;
+    hal_.set_frequency_channel(ch);
+    // Mirror the firmware probe advertisement (channel_byte 0x7E) so the on-air
+    // frame matches a real probe: index from RSSI ranking (1) + max quality.
+    uint8_t adv = RfDataLayer::select_best_channel(rssi_readings_);
+    rf_.set_channel_quality(adv, rssi_readings_[adv]);
+    ESP_LOGW(TAG, "TX TEST MODE: transmitting probe frames continuously on channel %d "
+                  "(Ch0 ~= 431.23 MHz) until reflashed", ch);
+    set_state_(State::TX_TEST);
+    return;
+  }
+
+  // Normal mode: stay IDLE, then fire ONE pairing attempt after pairing_delay_ms_
+  // with a 3-2-1 countdown so an air capture can be armed in time. We do NOT
+  // poll on the update() interval — on failure we go silent (see stop_()).
   set_state_(State::IDLE);
 
   ESP_LOGI(TAG, "Nartis RF Meter ready. %d sensor(s) registered.", (int) sensors_.size());
@@ -70,6 +87,32 @@ void NartisRfMeterComponent::setup_continue_() {
   uint8_t addr_bytes[8];
   address_.to_bytes(addr_bytes);
   ESP_LOGI(TAG, "RF address (8 bytes): %s", format_hex_pretty(addr_bytes, 8).c_str());
+
+  uint32_t d = pairing_delay_ms_;
+  ESP_LOGI(TAG, "Pairing will start in %u seconds — arm your capture on the countdown.",
+           (unsigned) (d / 1000));
+  if (d > 3000) this->set_timeout(d - 3000, [this]() { ESP_LOGI(TAG, "Pairing in 3..."); });
+  if (d > 2000) this->set_timeout(d - 2000, [this]() { ESP_LOGI(TAG, "Pairing in 2..."); });
+  if (d > 1000) this->set_timeout(d - 1000, [this]() { ESP_LOGI(TAG, "Pairing in 1..."); });
+  this->set_timeout(d, [this]() {
+    ESP_LOGW(TAG, ">>> PAIRING START <<<");
+    this->start_cycle_();
+  });
+}
+
+void NartisRfMeterComponent::start_cycle_() {
+  current_sensor_idx_ = 0;
+  retry_count_ = 0;
+  pair_retry_ = 0;
+  // With a pinned channel, skip the RSSI scan and go straight to channel setup.
+  set_state_(fix_channel_ >= 0 ? State::CHANNEL_SELECT : State::RSSI_SCAN);
+}
+
+void NartisRfMeterComponent::stop_(const char *reason) {
+  ESP_LOGW(TAG, "%s — STOPPED. No further transmissions. Reboot the ESP to retry.", reason);
+  finish_rx_();
+  hal_.go_sleep();
+  set_state_(State::STOPPED);
 }
 
 void NartisRfMeterComponent::dump_config() {
@@ -101,22 +144,10 @@ void NartisRfMeterComponent::dump_config() {
 }
 
 void NartisRfMeterComponent::update() {
-  if (sniff_mode_) {
-    return;  // passive listener — no poll cycle
-  }
-  if (state_ == State::IDLE) {
-    if (sensors_.empty()) {
-      ESP_LOGW(TAG, "No sensors registered — skipping update");
-      return;
-    }
-    ESP_LOGI(TAG, "Starting meter read cycle...");
-    current_sensor_idx_ = 0;
-    retry_count_ = 0;
-    // With a pinned channel, skip the RSSI scan and go straight to channel setup.
-    set_state_(fix_channel_ >= 0 ? State::CHANNEL_SELECT : State::RSSI_SCAN);
-  } else {
-    ESP_LOGD(TAG, "Update skipped — state machine busy (state=%d)", static_cast<int>(state_));
-  }
+  // One-shot operation: the single pairing/read cycle is kicked from setup_continue_
+  // after the countdown. We deliberately do NOT start a new cycle on the polling
+  // interval — so a failed pairing goes silent instead of re-polluting the air
+  // every interval. Reboot the ESP to run another attempt.
 }
 
 void NartisRfMeterComponent::loop() {
@@ -176,6 +207,8 @@ static const LogString *state_to_str(NartisRfMeterComponent::State s) {
     case NartisRfMeterComponent::State::NOT_INITIALIZED: return LOG_STR("NOT_INITIALIZED");
     case NartisRfMeterComponent::State::IDLE: return LOG_STR("IDLE");
     case NartisRfMeterComponent::State::SNIFF_LISTEN: return LOG_STR("SNIFF_LISTEN");
+    case NartisRfMeterComponent::State::TX_TEST: return LOG_STR("TX_TEST");
+    case NartisRfMeterComponent::State::STOPPED: return LOG_STR("STOPPED");
     case NartisRfMeterComponent::State::RSSI_SCAN: return LOG_STR("RSSI_SCAN");
     case NartisRfMeterComponent::State::CHANNEL_SELECT: return LOG_STR("CHANNEL_SELECT");
     case NartisRfMeterComponent::State::PAIR_PROBE_TX: return LOG_STR("PAIR_PROBE_TX");
@@ -211,6 +244,10 @@ void NartisRfMeterComponent::handle_state_() {
   uint32_t elapsed = esphome::millis() - state_entered_ms_;
 
   switch (state_) {
+    case State::STOPPED:
+      // Terminal: nothing to do. Radio is asleep; reboot to retry.
+      break;
+
     case State::SNIFF_LISTEN: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
@@ -222,6 +259,29 @@ void NartisRfMeterComponent::handle_state_() {
       if (status != RxStatus::IN_PROGRESS) {
         start_rx_();
         state_entered_ms_ = esphome::millis();  // refresh timer without log spam
+      }
+      break;
+    }
+
+    case State::TX_TEST: {
+      // Build and send one probe frame per loop() iteration, forever. Returning
+      // after each frame lets the framework service Wi-Fi/OTA between sends, so
+      // the device stays reachable to be reflashed (which is the only way out).
+      uint8_t payload[16];
+      size_t plen = build_pair_probe_payload_(payload, sizeof(payload));
+      if (plen == 0) {  // no meter_serial — send a placeholder so RF still goes out
+        memset(payload, '0', 13);
+        plen = 13;
+      }
+      size_t flen = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
+                                    RfFrameType::DATA, sequence_nr_++, payload, plen);
+      if (flen) {
+        hal_.transmit_chunked(tx_buf_.data(), flen);
+      }
+      // Throttle the log to ~1 line per 32 frames (~every few seconds).
+      if ((sequence_nr_ & 0x1F) == 0) {
+        ESP_LOGI(TAG, "TX TEST: transmitting on channel %d — point the SDR at the on-air freq",
+                 (fix_channel_ >= 0) ? fix_channel_ : 0);
       }
       break;
     }
@@ -541,13 +601,13 @@ void NartisRfMeterComponent::capture_meter_address_() {
 
 void NartisRfMeterComponent::handle_pair_probe_tx_() {
   if (pair_retry_ >= MAX_PAIR_RETRIES_) {
-    // No probe answer. The meter may already be paired (some only answer the
-    // beacon once paired) — fall back to the beacon/poll path instead of
-    // failing outright. If that also fails it lands in ERROR_RECOVERY.
-    ESP_LOGW(TAG, "Pairing: no probe answer after %d tries — trying beacon poll "
-                  "(meter may already be paired, or not in pairing mode)", pair_retry_);
-    paired_ = true;
-    set_state_(State::BEACON_TX);
+    stop_("Pairing: no probe answer from meter");
+    return;
+  }
+  // On a retry (re-entry after a failed wait), hold for ~5.5 s before retransmitting.
+  // First entry from CHANNEL_SELECT is not gated — pairing_delay_ms_ already paced it.
+  if (pair_retry_ > 0 &&
+      esphome::millis() - state_entered_ms_ < PAIR_STEP_DELAY_MS_) {
     return;
   }
   pair_retry_++;
@@ -573,8 +633,13 @@ void NartisRfMeterComponent::handle_pair_probe_tx_() {
 
 void NartisRfMeterComponent::handle_pair_ack_tx_() {
   if (pair_retry_ >= MAX_PAIR_RETRIES_) {
-    ESP_LOGW(TAG, "Pairing failed: no SESSION_SETUP after %d ACKs", pair_retry_);
-    set_state_(State::ERROR_RECOVERY);
+    stop_("Pairing: no SESSION_SETUP after ACKs");
+    return;
+  }
+  // Always pace by ~5.5 s: first entry is post-0x06 response, retries are post-timeout.
+  // The real CIU shows 5.1 s between ACK retransmits and ~5.6 s between meter
+  // response and next CIU TX — stomping in faster makes the meter ignore us.
+  if (esphome::millis() - state_entered_ms_ < PAIR_STEP_DELAY_MS_) {
     return;
   }
   pair_retry_++;
@@ -597,11 +662,23 @@ void NartisRfMeterComponent::handle_pair_ack_tx_() {
 }
 
 void NartisRfMeterComponent::handle_pair_mode6_tx_() {
+  // Pace by ~5.5 s after the meter's 0x53 SESSION_SETUP — the real CIU waits
+  // ~5.6 s before sending mode-6. Going faster causes the meter to drop us.
+  if (esphome::millis() - state_entered_ms_ < PAIR_STEP_DELAY_MS_) {
+    return;
+  }
   ESP_LOGI(TAG, "Pairing: sending mode-6 confirmation...");
-  // Plain mode-6 frame (flags 0x00, marker 0x8A), payload = 12-digit serial.
+  // Plain mode-6 frame (flags 0x00, marker 0x8A). Payload = '0' + 12-digit
+  // meter serial (13 B), same as the 0x46 probe — verified in f02 air capture.
+  uint8_t payload[16];
+  size_t payload_len = build_pair_probe_payload_(payload, sizeof(payload));
+  if (payload_len == 0) {
+    set_state_(State::ERROR_RECOVERY);
+    return;
+  }
   size_t frame_len = rf_.build_frame(
       tx_buf_.data(), tx_buf_.size(), RfFrameType::PLAIN_DATA, sequence_nr_++,
-      reinterpret_cast<const uint8_t *>(meter_serial_.c_str()), meter_serial_.size());
+      payload, payload_len);
   if (frame_len == 0 || !transmit_frame_(RfFrameType::PLAIN_DATA, tx_buf_.data(), frame_len)) {
     set_state_(State::ERROR_RECOVERY);
     return;
@@ -826,9 +903,10 @@ void NartisRfMeterComponent::handle_error_recovery_() {
   hal_.clear_fifo();
   dlms_.reset();
 
-  // Put radio to sleep
+  // Terminal: do not auto-retry on the next interval (would pollute the air).
   hal_.go_sleep();
-  set_state_(State::IDLE);
+  ESP_LOGW(TAG, "Stopped after error. No further TX — reboot the ESP to retry.");
+  set_state_(State::STOPPED);
 }
 
 /* ================================================================
