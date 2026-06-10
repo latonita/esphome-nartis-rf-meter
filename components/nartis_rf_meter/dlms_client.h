@@ -57,17 +57,57 @@ class DlmsClient {
 
   /* ---- APDU Builders (TX) ---- */
 
-  /// Build proprietary read request matching firmware nartis_build_read (0x8cac).
-  /// Format: C0 01 C1 00 [class_id:1B] [obis:6B] [attr_id:1B] 00
-  /// No DLMS-level auth — security is RF-layer AES-CCM only.
+  /// Single COSEM attribute reference for a get-request list entry.
+  struct AttrSpec {
+    uint16_t class_id;
+    ObisCode obis;
+    uint8_t attr_id;
+  };
+
+  static constexpr uint8_t MAX_LIST_ATTRS = 10;  // firmware caps at 10 per request
+
+  /// Build a `get-request-with-list` APDU containing one or more attribute
+  /// references. Format (matches dump-spi2 frame #0 / firmware
+  /// nartis_build_read 0x8cac):
+  ///   c0 03  c1  <count>
+  ///   <count × { class-id (2B BE) | OBIS (6B) | attr-id (1B) | access-sel (1B = 0x00) }>
+  /// Returns total bytes written, or 0 on error.
+  size_t build_get_request_with_list(uint8_t *out, size_t max,
+                                     const AttrSpec *attrs, uint8_t count);
+
+  /// Single-OBIS convenience wrapper — wraps a single attribute in the
+  /// `with-list` form (count=1). Used for steady-state reads.
   size_t build_read_request(uint8_t *out, size_t max,
                             const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
 
+  /// Build a `get-request-normal` APDU (single attribute, c0 01 form).
+  /// Format (verified against spi4 pairing capture frame #10 — the FIRST
+  /// post-pairing read the real CIU issues):
+  ///   c0 01  c1  <class-id 2B BE>  <OBIS 6B>  <attr-id 1B>  <access-sel 1B = 0x00>
+  /// The freshly-paired meter requires this normal-get (answered by a direct
+  /// 0x43, no keepalive) before it will engage the with-list flow.
+  /// Returns total bytes written (13), or 0 on error.
+  size_t build_get_request_normal(uint8_t *out, size_t max,
+                                  const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
+
   /* ---- APDU Parsers (RX) ---- */
 
-  /// Parse proprietary read response from meter.
-  /// Response format: [3-byte header][status=0x00][attr_id][DLMS typed data]
-  /// Strips envelope header and extracts typed value.
+  /// Parse a `get-response-with-list` (firmware-style multi-result response).
+  /// Strips the Nartis prefix (0d fd f8 + 2B tag) and IEC 62056-47 wrapper if
+  /// present. Then walks the result list, filling `values[]` from left to right.
+  ///
+  /// @param data    pointer to the decrypted payload (Nartis prefix + IEC + DLMS)
+  /// @param len     total payload bytes
+  /// @param values  caller-owned array of at least max_results DlmsValue slots
+  /// @param max_results capacity of `values[]`
+  /// @param count_out actual number of results returned by the meter (≤ max_results)
+  /// @return true if header parsed OK; individual result slots may carry NONE
+  ///         type if their data couldn't be parsed.
+  bool parse_read_response_list(const uint8_t *data, size_t len,
+                                DlmsValue *values, uint8_t max_results,
+                                uint8_t *count_out);
+
+  /// Legacy single-attribute response parser (kept for backwards compat).
   bool parse_read_response(const uint8_t *data, size_t len, DlmsValue *value_out);
 
   /* ---- State ---- */

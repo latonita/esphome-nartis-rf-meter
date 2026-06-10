@@ -377,11 +377,41 @@ static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
     {0x42, 0xB2, 0xA4, 0x1D, 0x42, 0x9B, 0xF2, 0x1C},  // CH2: RX 434.54 / TX 434.26 MHz
     {0x42, 0xF6, 0xB9, 0x1E, 0x42, 0xE0, 0x07, 0x1E},  // CH3: RX 434.98 / TX 434.70 MHz
 };
+
+/* Non-standard ("invented") frequency presets.
+ *
+ * Opt-in via YAML `use_non_standard_channels: true`. This is the MEASURED
+ * meter reply-frequency table, NOT a guess. DISCOVERY (iq3 captures 16/17/18 +
+ * real-CIU f01/f02): the advertised channel index in frame[12] bits 7:6 COMMANDS
+ * the meter's reply frequency — the meter answers on a per-channel frequency and
+ * the CIU listens there (TX always stays on Ch0/433.82, the meter's wake freq).
+ *
+ * The meter replies on the advertised channel's STANDARD TX-half frequency:
+ *   ch0->433.82  ch1->433.30  ch2->434.26  ch3->434.70 MHz
+ * (verified against real-CIU f01 and captures 20/21). The earlier "±1.7 MHz
+ * wander" was pure SDR ALIASING (e.g. ch1 433.30 -> 435.35 at 434.4/2.048).
+ *
+ * IMPORTANT (low-IF receiver): the CMT2300A RX register sets the LO; the
+ * received frequency is LO - IF, with IF ~= 280 kHz (= the spacing between every
+ * standard channel's RX-half and TX-half). So to RECEIVE the meter's reply at a
+ * channel's TX-half, the RX LO must be that channel's RX-half (TX-half + 280k).
+ * Therefore each entry's RX-half here = the STANDARD channel's RX-half (the LO),
+ * which down-converts the meter's TX-half reply; the TX-half is forced to
+ * Ch0/433.82 (the probe frequency the meter wakes on). The advertised channel
+ * and our RX channel MUST be the same index (handle_channel_select_).
+ * ch2 (LO 434.54 -> receives 434.26) is the default — proven across 16/17/20/21.
+ */
+static constexpr uint8_t NARTIS_CUSTOM_CHANNELS[4][8] = {
+    {0x42, 0x6D, 0x8F, 0x1C, 0x42, 0x57, 0xDD, 0x1B},  // CH0: RX LO 434.10 (recv 433.82) / TX 433.82
+    {0x42, 0xBF, 0x47, 0x1B, 0x42, 0x57, 0xDD, 0x1B},  // CH1: RX LO 433.58 (recv 433.30) / TX 433.82
+    {0x42, 0xB2, 0xA4, 0x1D, 0x42, 0x57, 0xDD, 0x1B},  // CH2: RX LO 434.54 (recv 434.26) / TX 433.82 (DEFAULT)
+    {0x42, 0xF6, 0xB9, 0x1E, 0x42, 0x57, 0xDD, 0x1B},  // CH3: RX LO 434.98 (recv 434.70) / TX 433.82
+};
 // clang-format on
 
 /* Runtime override values (applied after bank writes) */
 static constexpr uint8_t FIFO_MERGE_VALUE = 0x12;   // REG_SYS11: (reg & 0xE0) | 0x12 — merge TX+RX = 64B
-static constexpr uint8_t FIFO_TH_VALUE = 0x0C;      // REG_PKT29: (reg & 0xE0) | 0x0C — threshold = 12 bytes
+static constexpr uint8_t FIFO_TH_VALUE = 0x0F;      // REG_PKT29: (reg & 0xE0) | 0x0F — threshold = 15 bytes (firmware value)
 static constexpr uint8_t TX_REFILL_CHUNK = 15;       // Firmware refills 15 bytes per TX_FIFO_TH event (cmt_tx_chunked_write (0x131B8))
 
 /* Number of frequency channels */

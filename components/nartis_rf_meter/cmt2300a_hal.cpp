@@ -259,8 +259,9 @@ void Cmt2300aHal::write_full_config() {
   // Write 6 configuration banks
   write_bank(CMT_BANK_ADDR, NARTIS_CMT_BANK, CMT_BANK_SIZE);
   write_bank(SYSTEM_BANK_ADDR, NARTIS_SYSTEM_BANK, SYSTEM_BANK_SIZE);
-  // Frequency bank written per-channel (default to CH0)
-  write_bank(FREQUENCY_BANK_ADDR, NARTIS_FREQ_CHANNELS[0], FREQUENCY_BANK_SIZE);
+  // Frequency bank written per-channel (default to CH0). Honor the custom-channel
+  // flag so the initial bank matches what set_frequency_channel() will later write.
+  set_frequency_channel(0);
   write_bank(DATA_RATE_BANK_ADDR, NARTIS_DATA_RATE_BANK, DATA_RATE_BANK_SIZE);
   write_bank(BASEBAND_BANK_ADDR, NARTIS_BASEBAND_BANK, BASEBAND_BANK_SIZE);
   write_bank(TX_BANK_ADDR, NARTIS_TX_BANK, TX_BANK_SIZE);
@@ -270,14 +271,43 @@ void Cmt2300aHal::write_full_config() {
 }
 
 void Cmt2300aHal::apply_runtime_overrides() {
+  // ---- Firmware post-config patch (cmt_post_config @ 0x13666) ----
+  // Verified against fw/dump-spi/dump.txt lines 20-22 (real CIU init). These
+  // override the RFPDK bank defaults and are required for correct on-air
+  // operation. Without them the chip TXes on the wrong half of the freq bank
+  // and uses a sync word the meter rejects.
+  //
+  // pair-ours-05.iq confirmed the SYS2 patch alone moves TX from the freq
+  // bank's "RX-half" (434.10 MHz @ Ch0 = wrong) to the "TX-half"
+  // (433.82 MHz @ Ch0 = correct, matching every spi2/iq3 real-CIU capture).
+
+  // SYS2 (0x0D): clear top 3 bits — PLL/XO trim cluster. This is what flips
+  // the chip onto the TX-half of the freq bank (regs 0x1C..0x1F).
+  update_reg(REG_SYS2, 0xE0, 0x00);
+
+  // Sync word patch (firmware rf_change_sync_word(1), "normal" mode = 0x72 F6
+  // 55 55). RFPDK default was F6 55 55 55 — meter's correlator won't lock on
+  // the wrong byte. Persistent EEPROM byte struct[0x3D] = 0x01 in every real
+  // CIU we have selects this variant.
+  write_reg(REG_PKT10, 0x72);
+  write_reg(REG_PKT11, 0xF6);
+  write_reg(REG_PKT12, 0x55);
+  write_reg(REG_PKT13, 0x55);
+
+  // TX power = 14 dBm (firmware FUN_0001329A, table level 0x0E).
+  write_reg(REG_CMT4, 0x1C);
+  write_reg(REG_TX8,  0x56);
+  write_reg(REG_TX9,  0x0B);
+
+  // ---- FIFO + interrupt setup ----
+
   // FIFO merge: combine TX+RX FIFO into 64-byte single buffer
   // REG_SYS11 (0x16): (reg & 0xE0) | 0x12  — merge configuration
   update_reg(REG_SYS11, static_cast<uint8_t>(~MASK_FIFO_MERGE_CFG), FIFO_MERGE_VALUE);
   // REG_FIFO_CTL (0x69): set FIFO_MERGE_EN (firmware: FIFO_CTL |= 0x02)
   update_reg(REG_FIFO_CTL, MASK_FIFO_MERGE_EN, MASK_FIFO_MERGE_EN);
 
-  // FIFO threshold: 12 bytes
-  // REG_PKT29 (0x54): (reg & 0xE0) | 0x0C
+  // FIFO threshold — firmware uses 0x0F (15 bytes), not 0x0C.
   update_reg(REG_PKT29, MASK_FIFO_TH, FIFO_TH_VALUE);
 
   // Route the GPIO3 pad to INT2 — this is the only interrupt pad we wire to the
@@ -296,11 +326,12 @@ void Cmt2300aHal::apply_runtime_overrides() {
   update_reg(REG_INT2_CTL, MASK_INT2_SEL, INT_SEL_RX_FIFO_TH);
   update_reg(REG_INT2_CTL, MASK_INT_POLAR, 0x00);
 
-  // Enable PKT_DONE + TX_DONE latched interrupts (FIFO_TH on the GPIO follows
-  // the INT mux regardless of INT_EN).
-  write_reg(REG_INT_EN, INT_EN_PKT_DONE | INT_EN_TX_DONE);
+  // Firmware INT_EN = 0x39 (PKT_DONE | PREAM_OK | SYNC_OK | TX_DONE).
+  // FIFO_TH on the GPIO follows the INT mux regardless of INT_EN.
+  write_reg(REG_INT_EN, 0x39);
 
-  ESP_LOGD(TAG, "Runtime overrides applied (FIFO merge=64B; GPIO3 -> INT2, active-high, RX_FIFO_TH)");
+  ESP_LOGD(TAG, "Runtime overrides applied (post-config patch + FIFO merge=64B; "
+                "GPIO3 -> INT2, active-high, RX_FIFO_TH)");
 }
 
 /* ================================================================
@@ -398,8 +429,30 @@ void Cmt2300aHal::set_frequency_channel(uint8_t ch) {
     go_standby();
   }
 
-  write_bank(FREQUENCY_BANK_ADDR, NARTIS_FREQ_CHANNELS[ch], FREQUENCY_BANK_SIZE);
-  ESP_LOGD(TAG, "Set frequency channel %d", ch);
+  const uint8_t (*channels)[8] = use_custom_channels_ ? NARTIS_CUSTOM_CHANNELS : NARTIS_FREQ_CHANNELS;
+  write_bank(FREQUENCY_BANK_ADDR, channels[ch], FREQUENCY_BANK_SIZE);
+
+  ESP_LOGD(TAG, "Set frequency channel %d (%s preset)", ch, use_custom_channels_ ? "custom" : "firmware");
+}
+
+void Cmt2300aHal::set_rx_channel(uint8_t ch) {
+  if (ch >= NUM_CHANNELS) {
+    ESP_LOGW(TAG, "Invalid RX channel %d (max %d)", ch, NUM_CHANNELS - 1);
+    return;
+  }
+  bool was_not_standby = (get_state() != STA_STBY);
+  if (was_not_standby) {
+    go_standby();
+  }
+
+  // The frequency bank is 8 bytes: [0..3] = RX-half, [4..7] = TX-half. Write
+  // only the 4 RX bytes (regs 0x18..0x1B) so the TX frequency (set earlier to
+  // Ch0/433.82) is preserved — RX hops, TX stays on the meter's wake frequency.
+  const uint8_t (*channels)[8] = use_custom_channels_ ? NARTIS_CUSTOM_CHANNELS : NARTIS_FREQ_CHANNELS;
+  write_bank(FREQUENCY_BANK_ADDR, channels[ch], 4);
+
+  ESP_LOGD(TAG, "Set RX channel %d (%s preset, RX-only — TX unchanged)",
+           ch, use_custom_channels_ ? "custom" : "firmware");
 }
 
 /* ================================================================
@@ -447,6 +500,13 @@ void Cmt2300aHal::set_tx_payload_length(uint16_t len) {
   // PKT15 (0x46): PAYLOAD_LENG[7:0].
   write_reg(REG_PKT14, static_cast<uint8_t>((len >> 8) & 0x07) << 4);
   write_reg(REG_PKT15, static_cast<uint8_t>(len & 0xFF));
+}
+
+void Cmt2300aHal::set_rx_payload_length() {
+  // 511 = the large bank default ceiling. Variable-length-in-front frames are
+  // bounded by this; our frames are <= ~93 B, so it never caps a real frame.
+  // (Same register layout as the TX setter — single source of truth.)
+  set_tx_payload_length(511);
 }
 
 uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
@@ -556,24 +616,40 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   }
 
   // Poll: refill FIFO as it drains, wait for TX_DONE.
-  // 600 ms covers the largest frame (~290 B ≈ 480 ms airtime at 4800 bps).
+  // 600 ms covers the largest frame (~290 B ≈ 480 ms airtime at 4800 bps). // this shall be 2400!
   static constexpr uint32_t TX_TIMEOUT_MS = 600;
   uint32_t start = esphome::millis();
 
+  uint16_t refills = 0;  // diagnostic: how many TX_FIFO_TH refills we serviced
   while (esphome::millis() - start < TX_TIMEOUT_MS) {
     // Check TX_DONE first — leave flag set for caller's is_tx_done() check
     uint8_t int_clr1 = spi_read_reg(REG_INT_CLR1);
     if (int_clr1 & CLR1_TX_DONE_FLG) {
-      ESP_LOGD(TAG, "Chunked TX complete: %d bytes", (int) len);
+      ESP_LOGVV(TAG, "Chunked TX complete: %d/%d bytes written, %u refill(s)",
+               (int) written, (int) len, refills);
+      if (written < len) {
+        ESP_LOGW(TAG, "Chunked TX: TX_DONE but only %d/%d bytes written — frame truncated on air!",
+                 (int) written, (int) len);
+      }
       return true;
     }
 
-    // If more data to write, check if FIFO needs refill via GPIO3 (TX_FIFO_TH)
-    if (written < len && pin_read(gpio3_)) {
+    // Refill when the TX FIFO has DRAINED to/below threshold. Per the datasheet
+    // INT-source table, TX_FIFO_TH = 1 means "unread TX bytes OVER FIFO_TH" (still
+    // full); it reads 0 once drained to <= FIFO_TH (room for another chunk). The
+    // firmware (cmt_tx_chunked_write @ 0x131B8) refills on this flag CLEAR.
+    //
+    // BUG FIX: we previously polled GPIO3 (active-high TX_FIFO_TH) and refilled
+    // while it was HIGH — i.e. while the FIFO was still FULL — which overflowed
+    // the FIFO and dropped the frame tail. That silently corrupted every frame
+    // > 64 B (the ones needing a refill) while <= 64 B frames worked. Read the
+    // flag straight from REG_FIFO_FLAG over SPI so we don't depend on INT polarity.
+    if (written < len && (spi_read_reg(REG_FIFO_FLAG) & FIFO_TX_TH) == 0) {
       size_t remaining = len - written;
       size_t chunk = (remaining > TX_REFILL_CHUNK) ? TX_REFILL_CHUNK : remaining;
       spi_write_fifo(data + written, chunk);
       written += chunk;
+      refills++;
     }
 
     // Feed the watchdog — this loop can block for many ms and ESP8266's soft
@@ -582,8 +658,8 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
     esphome::delayMicroseconds(50);
   }
 
-  ESP_LOGW(TAG, "Chunked TX timeout (%d/%d bytes written, state=0x%02X, int_clr1=0x%02X)",
-           (int) written, (int) len, get_state(), spi_read_reg(REG_INT_CLR1));
+  ESP_LOGW(TAG, "Chunked TX timeout (%d/%d bytes written, %u refills, state=0x%02X, int_clr1=0x%02X)",
+           (int) written, (int) len, refills, get_state(), spi_read_reg(REG_INT_CLR1));
   go_standby();
   return false;
 }

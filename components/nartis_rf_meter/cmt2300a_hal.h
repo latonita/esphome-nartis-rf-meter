@@ -24,9 +24,6 @@
  *   We poll the physical pin rather than the SPI FIFO-flag register (0x6E):
  *   that register reads 0xFF here (Control2 bank), so it is unusable — matching
  *   the original CIU firmware, which also reads the chip's INT pin via MCU GPIO.
- *
- *   At the meter's 4800 bps on-air rate (~600 B/s), bytes trickle in one every
- *   ~1.7 ms, so the ESPHome loop() rate keeps up without an interrupt handler.
  */
 
 #pragma once
@@ -78,8 +75,17 @@ class Cmt2300aHal {
 
   /* ---- Frequency Channel ---- */
 
-  /// Switch frequency registers to channel 0-3.
+  /// Switch frequency registers to channel 0-3 (full TX+RX bank).
   void set_frequency_channel(uint8_t ch);
+
+  /// Switch ONLY the RX-half of the frequency bank to channel 0-3, leaving the
+  /// TX-half untouched. Used for RX channel hopping so the probe keeps
+  /// transmitting on the previously-set (Ch0/433.82) frequency.
+  void set_rx_channel(uint8_t ch);
+
+  /// Select which channel table set_frequency_channel() reads from:
+  /// false (default) = firmware NARTIS_FREQ_CHANNELS; true = NARTIS_CUSTOM_CHANNELS.
+  void set_use_custom_channels(bool enable) { use_custom_channels_ = enable; }
 
   /* ---- FIFO Operations ---- */
 
@@ -103,6 +109,14 @@ class Cmt2300aHal {
   /// Firmware writes this before every TX: bank leaves chip in fixed-length mode
   /// with PKT15=0xFF (511 bytes), so TX_DONE never fires for shorter packets.
   void set_tx_payload_length(uint16_t len);
+
+  /// Restore PAYLOAD_LENG to the large bank default (511) before RX.
+  /// set_tx_payload_length() shrinks it to the exact TX size before each
+  /// transmit; if left there, the packet engine caps the *next* RX at that
+  /// size, truncating every incoming frame to (TX_len + 1) bytes. Restoring the
+  /// ceiling lets the chip read the on-air length byte and accept the full
+  /// variable-length frame. Call from the RX-entry path before GO_RX.
+  void set_rx_payload_length();
 
   /// Chunked TX: write first 64B to FIFO, enter TX, poll TX_FIFO_TH to refill
   /// remaining data in 15-byte chunks. Returns true if TX_DONE received.
@@ -256,6 +270,7 @@ class Cmt2300aHal {
   esphome::ISRInternalGPIOPin gpio3_;
 
   bool initialized_{false};
+  bool use_custom_channels_{false};  // false = firmware presets, true = NARTIS_CUSTOM_CHANNELS
 };
 
 }  // namespace esphome::nartis_rf_meter

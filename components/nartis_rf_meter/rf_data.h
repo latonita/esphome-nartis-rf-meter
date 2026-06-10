@@ -1,7 +1,7 @@
 /*
  * Nartis RF Data Layer
  *
- * Layer 2: Packet framing, CRC-16/DNP, AES-128-CCM, channel management.
+ * Layer 2: Packet framing, CRC-16/DNP, AES-128-GCM, channel management.
  *
  * Structure (matches firmware rf_build_frame @ 0xBB88 and rf_parse_frame
  * @ 0xBF5E, verified against 208 SPI-extracted frames from Pair-B):
@@ -14,12 +14,12 @@
  *     [11]    sequence
  *     [12]    channel_byte = (chan_idx << 6) | (quality & 0x3F)
  *     [13]    enc_flag (0x01 encrypted)
- *     [14]    ccm_flag (0x29 = CCM B0)
+ *     [14]    sec_flag (0x29 = fixed security/AAD header byte)
  *     [15]    enc_data_len = L
  *     [16]    0x00
  *     [17..20] frame_counter (BE u32)
  *     [21..20+L]      ciphertext
- *     [21+L..32+L]    AES-CCM MIC (12 bytes)
+ *     [21+L..32+L]    AES-GCM tag (12 bytes)
  *     trailing CRC(s): single if total ≤ 128, dual otherwise (CRC1 at 0x7E)
  *
  *   RX (meter→CIU) plain layout:
@@ -39,6 +39,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include "helpers.h"
 
 namespace esphome::nartis_rf_meter {
@@ -50,7 +51,7 @@ class RfDataLayer {
   /* ---- Configuration ---- */
 
   /// Set the local (CIU) 8-byte RF address used for TX address field
-  /// AND for the AES-CCM nonce prefix.
+  /// AND for the AES-GCM nonce prefix.
   void set_address(const RfAddress &addr);
 
   /// Set the expected meter address (used to filter incoming frames).
@@ -60,6 +61,18 @@ class RfDataLayer {
 
   /// Set AES-128 key (16 bytes), e.g. "ZCZfuT666iRdgPNH"
   void set_aes_key(const uint8_t key[AES_KEY_SIZE]);
+  /// Read back the active AES-128 data key (16 bytes).
+  void get_aes_key(uint8_t key[AES_KEY_SIZE]) const { memcpy(key, aes_key_, AES_KEY_SIZE); }
+
+  /// Extract the 16-byte data key the meter delivers inside a 0x53
+  /// SESSION_SETUP key-install blob. The blob is GCM-encrypted with the
+  /// factory default key (0x22 x16); the nonce is perm(CIU address) + the
+  /// blob's inner counter (firmware key_install_verify @0x12DF0). The
+  /// plaintext is [slot][len=0x10][16-byte key = ASCII(meter_SN)[12] +
+  /// meter-assigned 4-byte suffix]. Returns true and fills `out_key` on a
+  /// well-formed blob (len byte == 0x10). CTR is symmetric so no separate
+  /// tag check is needed — the caller validates the embedded serial.
+  bool extract_session_key(const uint8_t *payload, size_t len, uint8_t out_key[AES_KEY_SIZE]) const;
 
   /// Set the channel index (0..3) and a representative RSSI (dBm) for
   /// outgoing frames' channel_byte at [12]. RSSI is mapped via the
@@ -74,8 +87,8 @@ class RfDataLayer {
 
   /// Build a complete on-air RF frame.
   ///   `payload` / `payload_len`: plaintext DLMS payload.
-  /// For encrypted modes (ACK/BEACON/DATA), the payload is AES-CCM encrypted
-  /// and the frame includes the enc_data_len/counter/MIC layout per spec.
+  /// For encrypted modes (ACK/BEACON/DATA), the payload is AES-GCM encrypted
+  /// and the frame includes the enc_data_len/counter/tag layout per spec.
   /// For PLAIN_DATA mode, the payload is written verbatim.
   /// Returns total frame size, or 0 on error.
   ///
@@ -119,7 +132,7 @@ class RfDataLayer {
 
   /// Parse a received RF frame, extracting payload.
   /// Validates CRC(s) (single or dual), verifies sender address matches
-  /// the configured meter address, and (if encrypted) AES-CCM decrypts
+  /// the configured meter address, and (if encrypted) AES-GCM decrypts
   /// AND rejects replayed counters (counter must be > last_rx_counter_).
   ///
   /// On RX type 0x43 plain frames, the payload contains a NESTED encrypted
@@ -140,6 +153,13 @@ class RfDataLayer {
   /// Returns plaintext length, or negative ParseResult on failure.
   int parse_nested_encrypted(const uint8_t *payload, size_t payload_len,
                               uint8_t *plain_out, size_t plain_max);
+
+  /// Diagnostic-only, NON-mutating decrypt of a nested encrypted body (same
+  /// layout as parse_nested_encrypted). Skips replay checks and does NOT
+  /// touch any counter state, so it is safe to call for logging before the
+  /// real handler parses the frame. Returns plaintext length, or <0.
+  int peek_nested_plain(const uint8_t *payload, size_t payload_len,
+                        uint8_t *plain_out, size_t plain_max) const;
 
   /// Classify a byte[1] value into an RxClass. Returns UNKNOWN for any
   /// value not in the firmware's comm_event_handler dispatch table.
@@ -167,7 +187,7 @@ class RfDataLayer {
 
   /* ---- Frame Counter ---- */
 
-  /// TX-side counter (used as AES-CCM nonce; auto-incremented per encrypted TX).
+  /// TX-side counter (used in the AES-GCM nonce; auto-incremented per encrypted TX).
   uint32_t get_frame_counter() const { return frame_counter_; }
   /// Set the TX counter — caller should call on startup with NVS-persisted value
   /// + safety margin (e.g. +16) to avoid replay rejection by the meter after reboot.
@@ -213,15 +233,16 @@ class RfDataLayer {
   /// or -1 on CRC error.
   static int crc_strip(uint8_t *buf, size_t frame_size);
 
-  /* ---- AES-128-CCM ---- */
+  /* ---- AES-128-GCM ---- */
 
-  /// Encrypt payload in-place, appending 12-byte MIC. Returns new length.
-  size_t aes_ccm_encrypt(uint8_t *data, size_t data_len, size_t buf_max, uint32_t counter);
+  /// Encrypt payload in-place, appending 12-byte tag. AAD = [01 29 len 00].
+  /// Returns new length.
+  size_t aes_gcm_encrypt(uint8_t *data, size_t data_len, size_t buf_max, uint32_t counter);
 
-  /// Decrypt payload in-place, verifying/removing MIC. Returns new length, or -1.
-  int aes_ccm_decrypt(uint8_t *data, size_t data_len, uint32_t counter);
+  /// Decrypt payload in-place, verifying/removing tag. Returns new length, or -1.
+  int aes_gcm_decrypt(uint8_t *data, size_t data_len, uint32_t counter);
 
-  /// Build 12-byte nonce: 8-byte address + 4-byte counter (BE).
+  /// Build 12-byte nonce: permuted 8-byte CIU address + 4-byte counter (BE).
   void build_nonce(uint8_t nonce[AES_NONCE_SIZE], const RfAddress &addr, uint32_t counter) const;
 
   /* ---- CRC Lookup Table ---- */

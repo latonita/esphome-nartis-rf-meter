@@ -28,18 +28,18 @@ static constexpr uint8_t RF_DEVICE_TYPE_CIU = 0x25; // byte [9] of CIU address
 static constexpr uint8_t RF_DEVICE_TYPE_METER = 0x02; // byte [9] of meter address
 
 /* ================================================================
- * Mode markers and AES-CCM flags
+ * Mode markers and AES-GCM security flag
  * ================================================================ */
 static constexpr uint8_t MODE_MARKER_NORMAL = 0x7A;   // header[10] for Mode 1/2/3 (TX)
 static constexpr uint8_t MODE_MARKER_SPECIAL = 0x8A;  // header[10] for Mode 6 (TX)
-static constexpr uint8_t AES_CCM_FLAGS = 0x29;        // CCM B0[1]: M=12, L=2, Adata=0
+static constexpr uint8_t AES_GCM_FLAG = 0x29;         // fixed security/AAD header byte (AAD = 01 29 len 00)
 
 /* ================================================================
- * AES-CCM Constants
+ * AES-128-GCM Constants
  * ================================================================ */
 static constexpr size_t AES_KEY_SIZE = 16;
 static constexpr size_t AES_NONCE_SIZE = 12;     // 8-byte addr + 4-byte counter
-static constexpr size_t AES_TAG_SIZE = 12;       // MIC length (M=12)
+static constexpr size_t AES_TAG_SIZE = 12;       // GCM tag length (12 bytes)
 
 /* ================================================================
  * CRC-16/DNP Constants
@@ -149,7 +149,7 @@ enum class RfFrameType : uint8_t {
   BEACON = 0x08,       // Mode 3: wake/beacon (short encrypted frame)
   DATA = 0x46,         // Mode 1: data frame
   ACK = 0x44,          // Mode 2: ACK / response (large encrypted frame)
-  PLAIN_DATA = 0x00,   // Mode 6: special-channel config (no RF AES-CCM)
+  PLAIN_DATA = 0x00,   // Mode 6: special-channel config (no RF AES-GCM)
 };
 
 /* ================================================================
@@ -165,7 +165,7 @@ static constexpr size_t RF_TX_MODE_MARKER  = 10;  // 0x7A normal | 0x8A special
 static constexpr size_t RF_TX_SEQUENCE     = 11;  // per-mode sequence counter
 static constexpr size_t RF_TX_CHANNEL_BYTE = 12;  // (chan<<6) | (quality & 0x3F)
 static constexpr size_t RF_TX_ENC_FLAG     = 13;  // 0x01 encrypted | 0x00 plain
-static constexpr size_t RF_TX_CCM_FLAG     = 14;  // 0x29 if encrypted | 0x00 plain
+static constexpr size_t RF_TX_SEC_FLAG     = 14;  // 0x29 if encrypted | 0x00 plain
 static constexpr size_t RF_TX_HDR_SIZE     = 15;  // bytes [0..14]
 
 // Encrypted body offsets (when ENC_FLAG=0x01)

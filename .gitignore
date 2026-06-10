@@ -31,3 +31,4 @@ tools/
 *.bits
 IMPLEMENTATION_PLAN.md
 rf_captures_decoded/
+rf*/

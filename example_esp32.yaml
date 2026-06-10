@@ -60,59 +60,134 @@ external_components:
 #
 nartis_rf_meter:
   id: nartis
+
   # CMT2300A pins
   pin_sdio: GPIO23
   pin_sclk: GPIO18
   pin_csb: GPIO27
   pin_fcsb: GPIO26
   pin_gpio3: GPIO34
+
   # Meter serial — the 12-digit number printed on the meter's nameplate
   # (e.g. "021245003137"). 
   meter_serial: "012345678901"
-  # CIU serial — if replacing an existing CIU device, put its serial here;
-  # if omitted, ESP32 MAC address is used (fresh pairing)
-  # ciu_serial: "MPCUA002RV634"
-  # How often to poll the meter (default 60s)
-  update_interval: 60s
+
+  # Use of alternative RF channels in some cases solves a problem of no reply from the meter
+  #use_non_standard_channels: true
+
+  # How often to poll the meter (default 5m)
+  update_interval: 5m
 
 # Sensors — OBIS codes for common Nartis I100/I300 registers
 sensor:
-  # Total active energy import (kWh) — OBIS 1.0.1.8.0.255
   - platform: nartis_rf_meter
-    nartis_rf_meter_id: nartis
-    name: "Total Energy"
+    name: "Voltage"
+    obis_code: "1.0.12.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Voltage A"
+    obis_code: "1.0.32.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+  
+  - platform: nartis_rf_meter
+    name: "Voltage B"
+    obis_code: "1.0.52.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+  
+  - platform: nartis_rf_meter
+    name: "Voltage C"
+    obis_code: "1.0.72.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+  
+  - platform: nartis_rf_meter
+    name: "Current"
+    obis_code: "1.0.11.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Current Neutral"
+    obis_code: "1.0.91.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Active energy total"
     obis_code: "1.0.1.8.0.255"
-    unit_of_measurement: "kWh"
-    accuracy_decimals: 3
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
     device_class: energy
     state_class: total_increasing
 
-  # Instantaneous active power (W) — OBIS 1.0.1.7.0.255
   - platform: nartis_rf_meter
-    nartis_rf_meter_id: nartis
+    name: "Active energy T1"
+    obis_code: "1.0.1.8.1.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
+    name: "Active energy T2"
+    obis_code: "1.0.1.8.2.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
     name: "Active Power"
     obis_code: "1.0.1.7.0.255"
-    unit_of_measurement: "W"
+    unit_of_measurement: W
     accuracy_decimals: 1
     device_class: power
     state_class: measurement
 
-  # Voltage (V) — OBIS 1.0.32.7.0.255
   - platform: nartis_rf_meter
-    nartis_rf_meter_id: nartis
-    name: "Voltage"
-    obis_code: "1.0.32.7.0.255"
-    unit_of_measurement: "V"
-    accuracy_decimals: 1
-    device_class: voltage
+    name: "Frequency"
+    obis_code: "1.0.14.7.0.255"
+    unit_of_measurement: Hz
+    accuracy_decimals: 2
+    device_class: frequency
     state_class: measurement
+    filters:
+      - multiply: 0.01
 
-  # Current (A) — OBIS 1.0.31.7.0.255
   - platform: nartis_rf_meter
-    nartis_rf_meter_id: nartis
-    name: "Current"
-    obis_code: "1.0.31.7.0.255"
-    unit_of_measurement: "A"
-    accuracy_decimals: 3
-    device_class: current
+    name: "Temperature"
+    obis_code: "0.0.96.9.0.255"
+    unit_of_measurement: °C
+    accuracy_decimals: 2
+    device_class: temperature
     state_class: measurement
+    filters:
+      - multiply: 0.01

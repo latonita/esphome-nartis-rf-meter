@@ -17,11 +17,29 @@ CONF_PIN_GPIO3 = "pin_gpio3"
 CONF_METER_SERIAL = "meter_serial"
 CONF_CIU_SERIAL = "ciu_serial"
 CONF_CIU_ADDRESS = "ciu_address"
-CONF_SNIFF_MODE = "sniff_mode"
-CONF_SNIFF_CHANNEL = "sniff_channel"
 CONF_FIX_CHANNEL = "fix_channel"
-CONF_TX_TEST_MODE = "tx_test_mode"
-CONF_PAIRING_DELAY = "pairing_delay"
+CONF_USE_NON_STANDARD_CHANNELS = "use_non_standard_channels"
+CONF_INITIAL_TIME = "initial_time"
+CONF_BATCH_SIZE = "batch_size"
+CONF_RX_TIMEOUT = "rx_timeout"
+CONF_RX_REPLY_TIMEOUT = "rx_reply_timeout"
+
+
+def validate_initial_time(value):
+    """Default wall-clock to seed the system clock with at boot (no NTP/WiFi).
+    Accepts 'YYYY-MM-DD HH:MM:SS' (interpreted as UTC) and stores epoch seconds.
+    The meter requires a live, advancing clock in the beacon before it delivers
+    data; this seeds one so the timestamp ticks even without a network time source."""
+    import datetime
+
+    s = cv.string_strict(value)
+    try:
+        dt = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError as err:
+        raise cv.Invalid(
+            f"initial_time must be 'YYYY-MM-DD HH:MM:SS' (UTC); got '{s}'"
+        ) from err
+    return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
@@ -51,61 +69,30 @@ def validate_ciu_address(value):
     return s.upper()
 
 
-def _require_meter_serial_unless_sniff(config):
-    """meter_serial is mandatory for active polling, but not for passive sniffing
-    or the RF TX test (which only needs to put a carrier on air)."""
-    if (
-        not config.get(CONF_SNIFF_MODE)
-        and not config.get(CONF_TX_TEST_MODE)
-        and CONF_METER_SERIAL not in config
-    ):
-        raise cv.Invalid(
-            f"'{CONF_METER_SERIAL}' is required unless '{CONF_SNIFF_MODE}' or "
-            f"'{CONF_TX_TEST_MODE}' is enabled"
-        )
-    if config.get(CONF_SNIFF_MODE) and config.get(CONF_TX_TEST_MODE):
-        raise cv.Invalid(
-            f"'{CONF_SNIFF_MODE}' and '{CONF_TX_TEST_MODE}' are mutually exclusive"
-        )
-    return config
-
-
-CONFIG_SCHEMA = cv.All(
-    cv.Schema(
-        {
+CONFIG_SCHEMA = cv.Schema(
+    {
             cv.GenerateID(): cv.declare_id(NartisRfMeterComponent),
             # CMT2300A bit-bang SPI pins
             cv.Required(CONF_PIN_SDIO): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_SCLK): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_CSB): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_FCSB): pins.internal_gpio_output_pin_schema,
-            # CMT2300A interrupt pin (input, active high). The chip's GPIO3 pad
-            # carries INT2, which we mux to the FIFO-threshold signal we poll
-            # (RX_FIFO_TH in RX, TX_FIFO_TH in TX). On the CMT2300A only GPIO3
-            # can output INT2, so wire the chip's GPIO3 pad to this ESP pin.
             cv.Required(CONF_PIN_GPIO3): pins.internal_gpio_input_pin_schema,
-            # Meter serial number (12 digits, printed on the meter nameplate).
-            # Required for active polling; optional in sniff_mode (see validator below).
-            cv.Optional(CONF_METER_SERIAL): validate_meter_serial,
-            # Passive sniff mode: never transmit — just park the radio in RX and
-            # log every received frame as raw hex (no CRC/address/AES decoding).
-            cv.Optional(CONF_SNIFF_MODE, default=False): cv.boolean,
-            # Frequency bank (0..3) to camp on while sniffing. The live CIU↔meter
-            # link runs on channel 0 (RX 434.1026 MHz), so 0 is the default.
-            cv.Optional(CONF_SNIFF_CHANNEL, default=0): cv.int_range(min=0, max=3),
-            # Pin the active-mode physical channel (0..3), bypassing the RSSI
-            # auto-scan. Omit for auto-select. Use fix_channel: 0 to match the
-            # firmware, which runs the live link on channel 0.
+
+            cv.Required(CONF_METER_SERIAL): validate_meter_serial,
+
             cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=0, max=3),
-            # RF TX test: transmit probe frames continuously (until reflashed) so
-            # an SDR can confirm the radio is emitting on the expected frequency.
-            # Honours fix_channel for the physical channel (default 0 ~431.23 MHz).
-            cv.Optional(CONF_TX_TEST_MODE, default=False): cv.boolean,
-            # Delay before the single pairing attempt fires (with a 3-2-1 countdown
-            # logged), giving time to arm an air capture. One-shot: no auto-retry.
-            cv.Optional(
-                CONF_PAIRING_DELAY, default="15s"
-            ): cv.positive_time_period_milliseconds,
+
+            # Use the non-standard ("invented") frequency presets placed on the
+            # meter's observed reply frequencies (RX 434.30/433.70/434.00/434.55,
+            # TX held at 433.82) instead of the firmware channel grid. The firmware
+            # RX presets are 97..278 kHz off where this meter actually replies and
+            # miss it; these centres + 100 kHz BW + AFC capture it. Default: off.
+            cv.Optional(CONF_USE_NON_STANDARD_CHANNELS, default=False): cv.boolean,
+            # Default wall-clock (UTC) to seed the system clock with at boot when
+            # there's no NTP/RTC source. The beacon carries a live clock the meter
+            # checks for freshness — without an advancing clock it refuses data.
+            cv.Optional(CONF_INITIAL_TIME): validate_initial_time,
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
@@ -113,10 +100,23 @@ CONFIG_SCHEMA = cv.All(
             # exact CIU a meter is already paired with — meters typically only
             # answer their paired CIU's address. Overrides ciu_serial/MAC.
             cv.Optional(CONF_CIU_ADDRESS): validate_ciu_address,
+            # --- Tuning (optional; sensible defaults — leave unset for normal use) ---
+            # How many user-defined OBIS attributes to read per get-request-with-list.
+            # Larger = fewer poll cycles but bigger 0x43 replies (DLMS caps at 10/list).
+            cv.Optional(CONF_BATCH_SIZE, default=1): cv.int_range(min=1, max=10),
+            # General RX wait before "no response": governs pairing waits and frame
+            # completion once a reply has started.
+            cv.Optional(
+                CONF_RX_TIMEOUT, default="3000ms"
+            ): cv.positive_time_period_milliseconds,
+            # Short RX wait for the steady-state GET reply (applied only until the
+            # first byte arrives). A request dropped in the meter's post-TX deaf
+            # window re-sends after this instead of stalling the full rx_timeout.
+            cv.Optional(
+                CONF_RX_REPLY_TIMEOUT, default="900ms"
+            ): cv.positive_time_period_milliseconds,
         }
-    ).extend(cv.polling_component_schema("60s")),
-    _require_meter_serial_unless_sniff,
-)
+).extend(cv.polling_component_schema("300s"))
 
 
 async def to_code(config):
@@ -137,20 +137,19 @@ async def to_code(config):
     irq = await cg.gpio_pin_expression(config[CONF_PIN_GPIO3])
     cg.add(var.set_pin_gpio3(irq))
 
-    if config[CONF_SNIFF_MODE]:
-        cg.add(var.set_sniff_mode(True))
-        cg.add(var.set_sniff_channel(config[CONF_SNIFF_CHANNEL]))
-
     if CONF_FIX_CHANNEL in config:
         cg.add(var.set_fix_channel(config[CONF_FIX_CHANNEL]))
 
-    if config[CONF_TX_TEST_MODE]:
-        cg.add(var.set_tx_test_mode(True))
+    cg.add(var.set_use_non_standard_channels(config[CONF_USE_NON_STANDARD_CHANNELS]))
 
-    cg.add(var.set_pairing_delay_ms(config[CONF_PAIRING_DELAY]))
+    if CONF_INITIAL_TIME in config:
+        cg.add(var.set_initial_epoch(config[CONF_INITIAL_TIME]))
 
-    if CONF_METER_SERIAL in config:
-        cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
+    cg.add(var.set_batch_size(config[CONF_BATCH_SIZE]))
+    cg.add(var.set_rx_timeout_ms(config[CONF_RX_TIMEOUT]))
+    cg.add(var.set_rx_reply_timeout_ms(config[CONF_RX_REPLY_TIMEOUT]))
+
+    cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
     if config[CONF_CIU_SERIAL]:
         cg.add(var.set_ciu_serial(config[CONF_CIU_SERIAL]))
     if CONF_CIU_ADDRESS in config:

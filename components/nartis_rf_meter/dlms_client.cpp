@@ -27,49 +27,94 @@ void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uin
 }
 
 /* ================================================================
- * Read Request Builder — Proprietary Nartis Protocol
+ * Read Request Builder — DLMS get-request-with-list (matches firmware)
  *
- * Firmware (nartis_build_read (0x8CAC)) uses a proprietary format instead of
- * standard DLMS AARQ + GET. Each register read is self-contained:
+ * spi2 frame #0 (real-CIU first post-pairing GET) shows the firmware uses
+ * the standard DLMS `get-request-with-list` form, NOT `get-request-normal`,
+ * even when only one attribute is interesting. Meter responds with
+ * `get-response-with-list`. The single-OBIS form (`c0 01`) gets `0x40`
+ * (no-data short-ack) instead of `0x43`.
  *
- *   [0]  = 0xC0  (request tag)
- *   [1]  = 0x01  (single-address mode)
- *   [2]  = 0xC1  (application sub-tag)
- *   [3]  = 0x00  (reserved)
- *   [4]  = class_id (1 byte — DLMS object class)
- *   [5-10] = OBIS code (6 bytes)
- *   [11] = attr_id (attribute index)
- *   [12] = 0x00  (no auth data)
+ * Format (verified against decrypted spi2 frame #0 payload):
  *
- * No separate association phase — meter responds with data directly.
+ *   c0 03                          ← tag + type (get-request-with-list)
+ *   c1                             ← invoke-id-priority
+ *   N                              ← attribute-list count (1..10 in captures)
+ *   [N × 10-byte attribute spec]:
+ *     2 B    class-id (BE u16)     ← e.g. 00 01 = 1 (Data class)
+ *     6 B    OBIS code             ← e.g. 00 00 60 80 03 FF
+ *     1 B    attr-id               ← e.g. 02 (value)
+ *     1 B    access-selector       ← 0x00 (none) in all firmware captures
+ *
+ * The legacy single-OBIS form is kept as `build_read_request_normal` for
+ * reference but not used in the GET path.
  * ================================================================ */
+
+size_t DlmsClient::build_get_request_with_list(uint8_t *out, size_t max,
+                                               const AttrSpec *attrs, uint8_t count) {
+  if (count == 0 || count > MAX_LIST_ATTRS) return 0;
+  // Each entry is 10 bytes (class 2 + OBIS 6 + attr 1 + access 1); header is 4.
+  const size_t needed = 4 + 10u * count;
+  if (max < needed) return 0;
+
+  size_t pos = 0;
+  out[pos++] = 0xC0;   // tag = get-request
+  out[pos++] = 0x03;   // type = get-request-with-list
+  out[pos++] = 0xC1;   // invoke-id-priority
+  out[pos++] = count;  // attribute-list count
+
+  for (uint8_t i = 0; i < count; i++) {
+    const AttrSpec &a = attrs[i];
+    out[pos++] = static_cast<uint8_t>((a.class_id >> 8) & 0xFF);
+    out[pos++] = static_cast<uint8_t>(a.class_id & 0xFF);
+    memcpy(out + pos, a.obis.bytes, 6);
+    pos += 6;
+    out[pos++] = a.attr_id;
+    out[pos++] = 0x00;  // access-selector = none
+  }
+
+  state_ = DlmsState::REQUEST_SENT;
+
+  ESP_LOGD(TAG, "Built get-request-with-list: count=%d (%d bytes)", count, (int) pos);
+  for (uint8_t i = 0; i < count; i++) {
+    const AttrSpec &a = attrs[i];
+    ESP_LOGD(TAG, "  [%d] class=%u OBIS=%u.%u.%u.%u.%u.%u attr=%u",
+             i, a.class_id, a.obis.bytes[0], a.obis.bytes[1], a.obis.bytes[2],
+             a.obis.bytes[3], a.obis.bytes[4], a.obis.bytes[5], a.attr_id);
+  }
+  return pos;
+}
 
 size_t DlmsClient::build_read_request(uint8_t *out, size_t max,
                                       const ObisCode &obis, uint16_t class_id,
                                       uint8_t attr_id) {
-  if (max < 13) return 0;
+  // Single-attribute wrapper around the list builder.
+  AttrSpec a{class_id, obis, attr_id};
+  return build_get_request_with_list(out, max, &a, 1);
+}
+
+size_t DlmsClient::build_get_request_normal(uint8_t *out, size_t max,
+                                            const ObisCode &obis, uint16_t class_id,
+                                            uint8_t attr_id) {
+  // c0 01 c1 <class 2B> <OBIS 6B> <attr 1B> <access-sel 1B> = 13 bytes.
+  const size_t needed = 13;
+  if (max < needed) return 0;
 
   size_t pos = 0;
-  out[pos++] = 0xC0;  // request tag
-  out[pos++] = 0x01;  // single-address mode
-  out[pos++] = 0xC1;  // application sub-tag
-  out[pos++] = 0x00;  // reserved
-
-  // COSEM attribute descriptor (1-byte class_id + 6-byte OBIS + 1-byte attr_id)
+  out[pos++] = 0xC0;   // tag = get-request
+  out[pos++] = 0x01;   // type = get-request-normal
+  out[pos++] = 0xC1;   // invoke-id-priority
+  out[pos++] = static_cast<uint8_t>((class_id >> 8) & 0xFF);
   out[pos++] = static_cast<uint8_t>(class_id & 0xFF);
   memcpy(out + pos, obis.bytes, 6);
   pos += 6;
   out[pos++] = attr_id;
-
-  // No auth data
-  out[pos++] = 0x00;
+  out[pos++] = 0x00;   // access-selector = none
 
   state_ = DlmsState::REQUEST_SENT;
-
-  ESP_LOGD(TAG, "Built read request: class=%d, obis=%d.%d.%d.%d.%d.%d, attr=%d (%d bytes)",
-           class_id, obis.bytes[0], obis.bytes[1], obis.bytes[2],
-           obis.bytes[3], obis.bytes[4], obis.bytes[5], attr_id, (int) pos);
-
+  ESP_LOGD(TAG, "Built get-request-normal: class=%u OBIS=%u.%u.%u.%u.%u.%u attr=%u (%d bytes)",
+           class_id, obis.bytes[0], obis.bytes[1], obis.bytes[2], obis.bytes[3],
+           obis.bytes[4], obis.bytes[5], attr_id, (int) pos);
   return pos;
 }
 
@@ -121,6 +166,197 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
     return false;
   }
 
+  state_ = DlmsState::IDLE;
+  return true;
+}
+
+/* ================================================================
+ * Multi-result response parser — get-response-with-list
+ *
+ * Decrypted payload layout observed in dump-spi2 frame #3:
+ *
+ *   0d fd f8 <2B tag/id>           ← Nartis prefix (5 bytes, optional)
+ *   00 01 00 01 00 66 00 <len>     ← IEC 62056-47 wrapper (8 bytes)
+ *   c4 03 c1 <count>               ← get-response-with-list header
+ *   <count × result>               ← each: tag (0=data | 1=err) + value
+ *
+ * Each `data` result is a DLMS typed value (already handled by parse_typed_value).
+ * Compound types (structure / array) are length-prefixed: we recursively skip
+ * past their inner items so the outer parser stays aligned.
+ * ================================================================ */
+
+// Recursively consume one DLMS typed value (returns bytes consumed, or -1 on error).
+// Used for skipping compound types we don't extract into DlmsValue.
+static int skip_typed_value(const uint8_t *data, size_t len) {
+  if (len < 1) return -1;
+  uint8_t type = data[0];
+  size_t pos = 1;
+  switch (type) {
+    case 0x00: return 1;                                          // null
+
+    case 0x03:                                                    // boolean
+    case 0x0F:                                                    // int8
+    case 0x11:                                                    // uint8
+    case 0x16:                                                    // enum
+      return (len < 2) ? -1 : 2;
+
+    case 0x10:                                                    // int16
+    case 0x12:                                                    // uint16
+      return (len < 3) ? -1 : 3;
+
+    case 0x05:                                                    // int32 (double-long)
+    case 0x06:                                                    // uint32 (double-long-unsigned)
+    case 0x17:                                                    // float32
+      return (len < 5) ? -1 : 5;
+
+    case 0x14:                                                    // int64
+    case 0x15:                                                    // uint64 (long64-unsigned)
+    case 0x18:                                                    // float64
+      return (len < 9) ? -1 : 9;
+
+    case 0x09:                                                    // octet-string
+    case 0x0A:                                                    // visible-string
+    case 0x0C: {                                                  // UTF-8 string
+      if (len < 2) return -1;
+      uint8_t slen = data[pos++];
+      if (pos + slen > len) return -1;
+      return static_cast<int>(pos + slen);
+    }
+
+    case 0x01:                                                    // array
+    case 0x02: {                                                  // structure
+      if (len < 2) return -1;
+      uint8_t count = data[pos++];
+      for (uint8_t i = 0; i < count; i++) {
+        int n = skip_typed_value(data + pos, len - pos);
+        if (n < 0) return -1;
+        pos += n;
+      }
+      return static_cast<int>(pos);
+    }
+
+    case 0x19: return (len < 13) ? -1 : 13;                       // date-time
+    case 0x1A: return (len < 6)  ? -1 : 6;                        // date
+    case 0x1B: return (len < 5)  ? -1 : 5;                        // time
+
+    default:
+      return -1;
+  }
+}
+
+bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
+                                          DlmsValue *values, uint8_t max_results,
+                                          uint8_t *count_out) {
+  if (count_out) *count_out = 0;
+  if (len < 6) {
+    ESP_LOGW(TAG, "list response too short (%u B)", (unsigned) len);
+    return false;
+  }
+
+  size_t pos = 0;
+
+  // Optional Nartis prefix `0d fd f8 <tag1> <tag2>`
+  if (len >= 5 && data[0] == 0x0D && data[1] == 0xFD && data[2] == 0xF8) {
+    pos = 5;
+  }
+
+  // IEC 62056-47 wrapper: 00 01 <src-wport 2B> <dst-wport 2B> <length 2B BE>
+  if (len < pos + 8) {
+    ESP_LOGW(TAG, "list response: no IEC wrapper at pos %u", (unsigned) pos);
+    return false;
+  }
+  if (data[pos] != 0x00 || data[pos + 1] != 0x01) {
+    ESP_LOGW(TAG, "list response: bad IEC version %02X %02X", data[pos], data[pos + 1]);
+    return false;
+  }
+  pos += 8;  // skip wrapper (version + wPorts + length)
+
+  // DLMS get-response-with-list header
+  if (len < pos + 4) {
+    ESP_LOGW(TAG, "list response: too short for DLMS header");
+    return false;
+  }
+  if (data[pos] != 0xC4) {
+    ESP_LOGW(TAG, "list response: tag != 0xC4 (got 0x%02X)", data[pos]);
+    return false;
+  }
+  // Accept both get-response-with-list (0x03: invoke + count, then N results)
+  // and get-response-normal (0x01: invoke, then a single result — the meter
+  // answers a 1-attr list this way). Normal has no count byte.
+  uint8_t count;
+  if (data[pos + 1] == 0x03) {
+    count = data[pos + 3];   // C4 03 <invoke> <count>
+    pos += 4;
+  } else if (data[pos + 1] == 0x01) {
+    count = 1;               // C4 01 <invoke> <single result>
+    pos += 3;
+  } else {
+    ESP_LOGW(TAG, "list response: type != normal/with-list (got 0x%02X)", data[pos + 1]);
+    return false;
+  }
+
+  ESP_LOGD(TAG, "get-response: count=%u (max %u slots)", count, max_results);
+
+  uint8_t stored = 0;
+  for (uint8_t i = 0; i < count; i++) {
+    if (pos >= len) {
+      ESP_LOGW(TAG, "  [%d] truncated", i);
+      break;
+    }
+    uint8_t result_tag = data[pos++];
+    if (result_tag == 1) {
+      // data-access-result: 1 error byte
+      if (pos >= len) break;
+      uint8_t err = data[pos++];
+      ESP_LOGW(TAG, "  [%d] access-error = 0x%02X", i, err);
+      if (stored < max_results) {
+        values[stored].type = DlmsValue::NONE;
+        stored++;
+      }
+      continue;
+    }
+    if (result_tag != 0) {
+      ESP_LOGW(TAG, "  [%d] unknown result tag 0x%02X", i, result_tag);
+      break;
+    }
+
+    // result_tag == 0: data follows. Decide whether to extract (simple scalar)
+    // or skip (compound type). Either way, advance `pos` correctly.
+    if (pos >= len) break;
+    uint8_t type_byte = data[pos];
+    const bool is_compound = (type_byte == 0x01 || type_byte == 0x02);
+
+    if (!is_compound && stored < max_results) {
+      int n = parse_typed_value(data + pos, len - pos, &values[stored]);
+      if (n < 0) {
+        ESP_LOGW(TAG, "  [%d] parse_typed_value failed (type=0x%02X)", i, type_byte);
+        // skip whatever follows so we stay aligned
+        int s = skip_typed_value(data + pos, len - pos);
+        if (s < 0) break;
+        pos += s;
+        values[stored].type = DlmsValue::NONE;
+      } else {
+        pos += n;
+        ESP_LOGD(TAG, "  [%d] type=0x%02X parsed (%d B)", i, type_byte, n);
+      }
+      stored++;
+    } else {
+      // Compound, or we've run out of caller-supplied slots — just skip.
+      int s = skip_typed_value(data + pos, len - pos);
+      if (s < 0) {
+        ESP_LOGW(TAG, "  [%d] skip failed (type=0x%02X)", i, type_byte);
+        break;
+      }
+      ESP_LOGD(TAG, "  [%d] type=0x%02X skipped (%d B)", i, type_byte, s);
+      pos += s;
+      if (stored < max_results) {
+        values[stored].type = DlmsValue::NONE;
+        stored++;
+      }
+    }
+  }
+
+  if (count_out) *count_out = stored;
   state_ = DlmsState::IDLE;
   return true;
 }
