@@ -296,20 +296,23 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
     ESP_LOGW(TAG, "list response: tag != 0xC4 (got 0x%02X)", data[pos]);
     return false;
   }
-  // Accept both get-response-with-list (0x03: invoke + count, then N results)
-  // and get-response-normal (0x01: invoke, then a single result — the meter
-  // answers a 1-attr list this way). Normal has no count byte.
-  uint8_t count;
-  if (data[pos + 1] == 0x03) {
-    count = data[pos + 3];   // C4 03 <invoke> <count>
-    pos += 4;
-  } else if (data[pos + 1] == 0x01) {
-    count = 1;               // C4 01 <invoke> <single result>
-    pos += 3;
-  } else {
-    ESP_LOGW(TAG, "list response: type != normal/with-list (got 0x%02X)", data[pos + 1]);
+  // Our user reads are always get-request-with-list, and the meter always
+  // answers them with get-response-with-list (0xC4 0x03) — even a 1-attr batch
+  // (verified: a single-OBIS request still returns `C4 03 C1 01 …`). The ONLY
+  // thing that emits get-response-normal (0xC4 0x01) is the priming
+  // get-request-normal. The meter sometimes BUFFERS that priming answer and
+  // delivers it LATE, landing as the first 0x43 of the user-read phase. If we
+  // accepted the normal form here we'd store its stray scalar into the first
+  // batch slot (e.g. Voltage) — the bogus 5.4e17 V reading. Reject anything
+  // that isn't a with-list response so the caller re-sends the request and
+  // gets the real C4 03 answer.
+  if (data[pos + 1] != 0x03) {
+    ESP_LOGW(TAG, "list response: not get-response-with-list (got 0x%02X 0x%02X) — "
+                  "ignoring stale/mismatched response", data[pos], data[pos + 1]);
     return false;
   }
+  uint8_t count = data[pos + 3];   // C4 03 <invoke> <count>
+  pos += 4;
 
   ESP_LOGD(TAG, "get-response: count=%u (max %u slots)", count, max_results);
 

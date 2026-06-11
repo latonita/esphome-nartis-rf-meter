@@ -1277,6 +1277,16 @@ bool NartisRfMeterComponent::handle_get_response_() {
     // Priming normal-get response — discard, don't touch batch state.
     ESP_LOGI(TAG, "Priming response: parsed %u result slots — discarding", got_count);
   } else {
+    // Guard: a real with-list answer returns exactly one result per requested
+    // attribute (access-errors included as invalid slots). A count mismatch
+    // means this frame isn't the answer to the batch we just sent (e.g. a
+    // stale/duplicate response) — reject so the caller re-sends rather than
+    // storing values into the wrong sensor slots.
+    if (got_count != batch_count_) {
+      ESP_LOGW(TAG, "GET response: count mismatch (got %u, expected %u) — "
+                    "ignoring mismatched/stale response", got_count, batch_count_);
+      return false;
+    }
     // Store each result into the corresponding user-sensor slot.
     for (uint8_t i = 0; i < got_count && (batch_start_idx_ + i) < sensors_.size(); i++) {
       if (values[i].has_value()) {
