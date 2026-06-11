@@ -22,7 +22,6 @@ CONF_USE_NON_STANDARD_CHANNELS = "use_non_standard_channels"
 CONF_BATCH_SIZE = "batch_size"
 CONF_RX_TIMEOUT = "rx_timeout"
 CONF_RX_REPLY_TIMEOUT = "rx_reply_timeout"
-CONF_SKIP_PRIMING = "skip_priming"
 CONF_SKIP_FIN_BEACONS = "skip_fin_beacons"
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
@@ -95,11 +94,6 @@ CONFIG_SCHEMA = cv.Schema(
             cv.Optional(
                 CONF_RX_REPLY_TIMEOUT, default="900ms"
             ): cv.positive_time_period_milliseconds,
-            # EXPERIMENT — KNOWN HARMFUL, leave off. Skipping priming does NOT
-            # save time (the first GET of a session is always sacrificial) and
-            # corrupts data: the first real batch is lost and its buffered values
-            # leak into the next batch. Kept as a documented dead-end. Default off.
-            cv.Optional(CONF_SKIP_PRIMING, default=False): cv.boolean,
             # EXPERIMENT: skip the closing ("FIN") beacon after each GET response
             # and proceed straight to the next batch. Saves ~4.5 s per batch.
             # Default off.
@@ -134,7 +128,6 @@ async def to_code(config):
     cg.add(var.set_batch_size(config[CONF_BATCH_SIZE]))
     cg.add(var.set_rx_timeout_ms(config[CONF_RX_TIMEOUT]))
     cg.add(var.set_rx_reply_timeout_ms(config[CONF_RX_REPLY_TIMEOUT]))
-    cg.add(var.set_skip_priming(config[CONF_SKIP_PRIMING]))
     cg.add(var.set_skip_fin_beacons(config[CONF_SKIP_FIN_BEACONS]))
 
     cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))

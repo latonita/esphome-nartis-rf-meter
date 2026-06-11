@@ -77,10 +77,6 @@ void NartisRfMeterComponent::setup_continue_() {
 
 void NartisRfMeterComponent::start_cycle_() {
   session_start_ms_ = esphome::millis();  // start of the meter session — measured to PUBLISH
-  // Snapshot whether we entered this cycle already paired. skip_priming_ only
-  // applies to such regular sessions — a cycle that performs pairing this run
-  // still needs the priming opener to engage the meter.
-  session_was_paired_ = paired_;
   current_sensor_idx_ = 0;
   retry_count_ = 0;
   pair_retry_ = 0;
@@ -333,8 +329,6 @@ static const LogString *state_to_str(NartisRfMeterComponent::State s) {
     case NartisRfMeterComponent::State::GET_FIN_BEACON_TX: return LOG_STR("GET_FIN_BEACON_TX");
     case NartisRfMeterComponent::State::GET_FIN_BEACON_WAIT_TX_DONE: return LOG_STR("GET_FIN_BEACON_WAIT_TX_DONE");
     case NartisRfMeterComponent::State::GET_WAIT_FINAL_ACK: return LOG_STR("GET_WAIT_FINAL_ACK");
-    case NartisRfMeterComponent::State::ACK_TX: return LOG_STR("ACK_TX");
-    case NartisRfMeterComponent::State::ACK_WAIT_TX_DONE: return LOG_STR("ACK_WAIT_TX_DONE");
     case NartisRfMeterComponent::State::PUBLISH: return LOG_STR("PUBLISH");
     case NartisRfMeterComponent::State::ERROR_RECOVERY: return LOG_STR("ERROR_RECOVERY");
     default: return LOG_STR("UNKNOWN");
@@ -806,23 +800,6 @@ void NartisRfMeterComponent::handle_state_() {
       break;
     }
 
-    case State::ACK_TX:
-      handle_ack_tx_();
-      break;
-
-    case State::ACK_WAIT_TX_DONE: {
-      uint32_t ack_elapsed = esphome::millis() - state_entered_ms_;
-      if (hal_.is_tx_done()) {
-        ESP_LOGD(TAG, "ACK TX complete");
-        hal_.clear_interrupt_flags();
-        advance_after_get_();
-      } else if (ack_elapsed > 1000) {
-        ESP_LOGW(TAG, "ACK TX timeout");
-        advance_after_get_();
-      }
-      break;
-    }
-
     case State::PUBLISH:
       handle_publish_();
       break;
@@ -1166,16 +1143,6 @@ void NartisRfMeterComponent::handle_get_tx_() {
     return;
   }
 
-  // EXPERIMENT (skip_priming_): on a regular, already-paired session, bypass the
-  // get-request-normal opener and go straight to the with-list reads. Restricted
-  // to non-pairing cycles via session_was_paired_ — a freshly-paired meter still
-  // needs the priming handshake.
-  if (skip_priming_ && !session_primed_ && session_was_paired_) {
-    ESP_LOGW(TAG, "GET: skip_priming is ON — KNOWN HARMFUL: first batch becomes the "
-                  "sacrificial read and its values leak into the next batch. Disable it.");
-    session_primed_ = true;
-  }
-
   // ---- Build the current batch ----
   // Two phases:
   //   Phase 0 (!session_primed_): get-request-NORMAL (c0 01, single OBIS).
@@ -1391,30 +1358,6 @@ void NartisRfMeterComponent::skip_current_batch_() {
   }
 }
 
-void NartisRfMeterComponent::handle_ack_tx_() {
-  ESP_LOGD(TAG, "Sending ACK for GET response...");
-
-  // ACK frame: Mode 2 (header 0x44), RF AES-GCM encrypted, empty payload.
-  // Mode-2 uses data_seq_ (continues the mode-1/2 counter).
-  size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
-                                     RfFrameType::ACK, 0x00, data_seq_++,
-                                     nullptr, 0);
-  if (frame_len == 0) {
-    ESP_LOGW(TAG, "Failed to build ACK frame");
-    advance_after_get_();
-    return;
-  }
-
-  finish_rx_();  // Stop RX before switching to TX
-
-  if (!transmit_frame_(RfFrameType::ACK, tx_buf_.data(), frame_len)) {
-    advance_after_get_();
-    return;
-  }
-
-  set_state_(State::ACK_WAIT_TX_DONE);
-}
-
 void NartisRfMeterComponent::advance_after_get_() {
   // Priming complete: the meter has now engaged (we ran one full normal-get
   // cycle). Mark the session primed and continue to the first with-list read.
@@ -1506,12 +1449,6 @@ bool NartisRfMeterComponent::transmit_frame_(RfFrameType type,
   // Use chunked TX for all frames — handles packets > 64 bytes
   // (AARQ can be ~80-100B after CRC framing, beacons ~60-70B)
   return hal_.transmit_chunked(frame, len);
-}
-
-int NartisRfMeterComponent::receive_frame_(uint8_t *payload_out, size_t max,
-                                           RfFrameType *type_out) {
-  // Use accumulated RX buffer from chunked reception
-  return rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload_out, max, type_out);
 }
 
 /* ================================================================

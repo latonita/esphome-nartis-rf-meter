@@ -100,20 +100,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// batches mean fewer cycles but bigger 0x43 responses. Default 1.
   void set_batch_size(uint8_t n) { user_batch_size_ = (n < 1) ? 1 : n; }
 
-  /// EXPERIMENT — KNOWN HARMFUL, leave OFF. The idea was to skip the
-  /// get-request-normal priming opener on a paired session to save ~15 s.
-  /// Tested 2026-06-11: it does NOT save time and CORRUPTS data. On this meter
-  /// the FIRST GET of a session is always "sacrificial" — it returns 0x5B then
-  /// only 0x40 (no-data) on the req-beacons, and its result is buffered and
-  /// delivered to the NEXT GET. The priming read exists to BE that sacrifice and
-  /// to absorb that one-response lag (its leftover is the stale C4 01 the parser
-  /// rejects, which forces a resend that re-syncs the pipeline). With priming
-  /// skipped, the first real batch is sacrificed instead (Voltage/Current/
-  /// Neutral lost) AND its buffered values land in the next batch with a valid
-  /// C4 03 the guards can't catch (e.g. energy-total published as 237.9). Kept
-  /// only as a documented dead-end. Default off.
-  void set_skip_priming(bool enable) { skip_priming_ = enable; }
-
   /// EXPERIMENT: skip the closing ("FIN") beacon after each GET response and go
   /// straight to the next batch. Saves ~4.5 s per batch. Default off.
   void set_skip_fin_beacons(bool enable) { skip_fin_beacons_ = enable; }
@@ -166,9 +152,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     GET_FIN_BEACON_TX,            // TX 0x08 BEACON to acknowledge data
     GET_FIN_BEACON_WAIT_TX_DONE,
     GET_WAIT_FINAL_ACK,           // expect RX 0x40 short ack — cycle complete
-    // Legacy ACK_TX path (kept for backward compat with non-GET callers, unused in normal cycle)
-    ACK_TX,
-    ACK_WAIT_TX_DONE,
     // Publish results
     PUBLISH,
     // Error recovery
@@ -248,7 +231,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   bool tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len);
   void handle_get_tx_();
   bool handle_get_response_();   // returns false if the response could not be parsed
-  void handle_ack_tx_();
   void advance_after_get_();
   void skip_current_batch_();    // force-advance past the current batch (parse give-up)
   void handle_publish_();
@@ -256,7 +238,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
 
   // TX/RX helpers
   bool transmit_frame_(RfFrameType type, const uint8_t *payload, size_t len);
-  int receive_frame_(uint8_t *payload_out, size_t max, RfFrameType *type_out);
 
   // Chunked RX — for packets > 64 bytes
   enum class RxStatus : uint8_t {
@@ -362,9 +343,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   uint8_t user_batch_size_{USER_BATCH_SIZE_DEFAULT_};
   uint32_t rx_timeout_ms_{RX_TIMEOUT_MS_DEFAULT_};
   uint32_t rx_reply_timeout_ms_{RX_REPLY_TIMEOUT_MS_DEFAULT_};
-  bool skip_priming_{false};       // YAML skip_priming — bypass normal-GET opener on paired sessions
   bool skip_fin_beacons_{false};   // YAML skip_fin_beacons — no closing beacon between batches
-  bool session_was_paired_{false}; // paired_ snapshot at start_cycle_(); gates skip_priming_ to non-pairing cycles
   uint8_t current_sensor_idx_{0};
   // The firmware maintains TWO independent TX sequence counters (per
   // FRAME_HEADER_SPEC §4 + verified in iq3/f02 pairing capture):
