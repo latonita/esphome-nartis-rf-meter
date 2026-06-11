@@ -164,6 +164,14 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void set_state_(State new_state);
   void handle_state_();
 
+  /// In a pairing WAIT_RESPONSE state, if a noise/unexpected frame arrived but
+  /// parse-retries and the RX window both have budget left, re-arm the receiver
+  /// to listen for the meter's (re)transmission. Returns true if it re-armed
+  /// (caller should stop), false if the budget is exhausted (caller falls
+  /// through to its give-up branch). `ctx`/`got_type`/`parse_result` are for
+  /// logging only.
+  bool try_rearm_rx_(const char *ctx, uint8_t got_type, int parse_result);
+
   /// Kick off one pairing/read cycle. Called from update() whenever IDLE.
   /// Always starts at RSSI scan → channel select; the pair-vs-read branch then
   /// happens in handle_channel_select_() based on paired_.

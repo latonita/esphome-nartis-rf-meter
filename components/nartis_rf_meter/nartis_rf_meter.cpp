@@ -340,6 +340,21 @@ void NartisRfMeterComponent::set_state_(State new_state) {
   state_entered_ms_ = esphome::millis();
 }
 
+bool NartisRfMeterComponent::try_rearm_rx_(const char *ctx, uint8_t got_type, int parse_result) {
+  // The +300 ms guard leaves room for one more TX→RX turnaround before the
+  // RX window (rx_timeout_ms_) would expire, so we never re-arm into a window
+  // that can't complete.
+  if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
+      esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
+    rx_parse_retries_++;
+    ESP_LOGW(TAG, "%s: noise frame (type=0x%02X, n=%d) — re-arm RX (try %u/%u)",
+             ctx, got_type, parse_result, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
+    start_rx_();
+    return true;
+  }
+  return false;
+}
+
 void NartisRfMeterComponent::handle_state_() {
   switch (state_) {
     case State::RSSI_SCAN:
@@ -389,15 +404,10 @@ void NartisRfMeterComponent::handle_state_() {
           ESP_LOGW(TAG, "Pairing: 0x06 with parse fail (n=%d) — re-arm RX for clean frame "
                         "(try %u/%u)", n, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
           start_rx_();
-        } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
-                   esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
-          // Noise frame, not the expected 0x06. Re-arm RX and try again within
-          // the same wait window — the meter may have retransmitted (it sends
-          // an ACK per probe; see iq3/f02 latency 250 ms).
-          rx_parse_retries_++;
-          ESP_LOGW(TAG, "Pairing: noise frame (type=0x%02X, n=%d) — re-arm RX (try %u/%u)",
-                   t, n, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-          start_rx_();
+        } else if (try_rearm_rx_("Pairing probe", t, n)) {
+          // Noise frame, not the expected 0x06 — re-armed to listen for the
+          // meter's retransmission within the same wait window (it sends an ACK
+          // per probe; see iq3/f02 latency 250 ms).
         } else {
           ESP_LOGW(TAG, "Pairing: unexpected probe response (type=0x%02X, n=%d)", t, n);
           rx_parse_retries_ = 0;
@@ -478,13 +488,8 @@ void NartisRfMeterComponent::handle_state_() {
           paired_ = true;
           rx_parse_retries_ = 0;
           set_state_(State::BEACON_TX);
-        } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
-                   esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
-          // Noise frame. Re-arm RX and try once more within the same window.
-          rx_parse_retries_++;
-          ESP_LOGW(TAG, "Pairing: noise frame in ACK-wait (type=0x%02X, n=%d) — "
-                        "re-arm RX (try %u/%u)", t, n, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-          start_rx_();
+        } else if (try_rearm_rx_("Pairing ACK-wait", t, n)) {
+          // Noise frame — re-armed to listen once more within the same window.
         } else {
           ESP_LOGW(TAG, "Pairing: unexpected ACK response (type=0x%02X, n=%d)", t, n);
           rx_parse_retries_ = 0;
@@ -521,12 +526,8 @@ void NartisRfMeterComponent::handle_state_() {
           paired_ = true;
           rx_parse_retries_ = 0;
           set_state_(State::BEACON_TX);
-        } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
-                   esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
-          rx_parse_retries_++;
-          ESP_LOGW(TAG, "Pairing keepalive: noise frame (type=0x%02X, n=%d) — re-arm RX (try %u/%u)",
-                   t, n, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-          start_rx_();
+        } else if (try_rearm_rx_("Pairing keepalive", t, n)) {
+          // Noise frame — re-armed to listen once more within the same window.
         } else {
           ESP_LOGW(TAG, "Pairing: gave up keepalive wait (type=0x%02X) — proceeding anyway", t);
           paired_ = true;
