@@ -651,22 +651,7 @@ void NartisRfMeterComponent::handle_state_() {
           // needed) — matches genuine captures (licon spi4 #10→#12, real01 #1→#4).
           ESP_LOGD(TAG, "GET cycle: meter answered GET directly with data (0x43)");
           retry_count_ = 0;
-          if (handle_get_response_()) {
-            resp_fail_retries_ = 0;
-            if (skip_fin_beacons_) {
-              advance_after_get_();  // experiment: straight to next batch, no closing beacon
-            } else {
-              set_state_(State::GET_FIN_BEACON_TX);
-            }
-          } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
-            ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
-                     resp_fail_retries_, batch_start_idx_);
-            resp_fail_retries_ = 0;
-            skip_current_batch_();
-            advance_after_get_();
-          } else {
-            set_state_(State::GET_TX);  // retry same batch
-          }
+          handle_data_response_();
         } else {
           ESP_LOGW(TAG, "GET cycle: unexpected response to get-request (type=0x%02X)", raw_type);
           set_state_(State::GET_TX);  // retry whole get-request
@@ -677,7 +662,7 @@ void NartisRfMeterComponent::handle_state_() {
         retry_count_++;
         if (retry_count_ >= GET_REPLY_MAX_RETRIES_) {
           ESP_LOGW(TAG, "GET cycle: max retries — skipping batch (start=%u)", batch_start_idx_);
-          if (session_primed_) batch_start_idx_ += batch_count_;  // skip this user batch
+          skip_current_batch_();
           retry_count_ = 0;
           advance_after_get_();
         } else {
@@ -715,22 +700,7 @@ void NartisRfMeterComponent::handle_state_() {
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         if (raw_type == 0x43) {
-          if (handle_get_response_()) {
-            resp_fail_retries_ = 0;
-            if (skip_fin_beacons_) {
-              advance_after_get_();  // experiment: straight to next batch, no closing beacon
-            } else {
-              set_state_(State::GET_FIN_BEACON_TX);  // closing beacon
-            }
-          } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
-            ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
-                     resp_fail_retries_, batch_start_idx_);
-            resp_fail_retries_ = 0;
-            skip_current_batch_();
-            advance_after_get_();
-          } else {
-            set_state_(State::GET_TX);  // retry same batch
-          }
+          handle_data_response_();
         } else {
           ESP_LOGW(TAG, "GET cycle: unexpected data response (type=0x%02X) — retrying req-beacon",
                    raw_type);
@@ -757,7 +727,7 @@ void NartisRfMeterComponent::handle_state_() {
         ESP_LOGD(TAG, "GET cycle: no data response yet (batch start=%u) — re-sending", batch_start_idx_);
         retry_count_++;
         if (retry_count_ >= GET_REPLY_MAX_RETRIES_) {
-          if (session_primed_) batch_start_idx_ += batch_count_;
+          skip_current_batch_();
           retry_count_ = 0;
           advance_after_get_();
         } else {
@@ -1237,6 +1207,30 @@ bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len)
     return false;
   }
   return transmit_frame_(RfFrameType::ACK, tx_buf_.data(), frame_len);
+}
+
+void NartisRfMeterComponent::handle_data_response_() {
+  // Shared 0x43 data-response handling for both GET_WAIT_KEEPALIVE (meter
+  // answered the GET directly) and GET_WAIT_DATA. Parse the response; on
+  // success advance to the closing beacon — or straight to the next batch when
+  // skip_fin_beacons_ is set. On repeated parse failure skip the batch;
+  // otherwise re-send the current GET.
+  if (handle_get_response_()) {
+    resp_fail_retries_ = 0;
+    if (skip_fin_beacons_) {
+      advance_after_get_();  // experiment: straight to next batch, no closing beacon
+    } else {
+      set_state_(State::GET_FIN_BEACON_TX);  // closing beacon
+    }
+  } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
+    ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
+             resp_fail_retries_, batch_start_idx_);
+    resp_fail_retries_ = 0;
+    skip_current_batch_();
+    advance_after_get_();
+  } else {
+    set_state_(State::GET_TX);  // retry same batch
+  }
 }
 
 bool NartisRfMeterComponent::handle_get_response_() {

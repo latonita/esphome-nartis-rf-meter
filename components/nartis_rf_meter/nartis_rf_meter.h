@@ -226,6 +226,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   bool tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len);
   void handle_get_tx_();
   bool handle_get_response_();   // returns false if the response could not be parsed
+  void handle_data_response_();  // shared 0x43 data-response handling for both GET wait states
   void advance_after_get_();
   void skip_current_batch_();    // force-advance past the current batch (parse give-up)
   void handle_publish_();
