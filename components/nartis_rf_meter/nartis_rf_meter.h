@@ -100,6 +100,24 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// batches mean fewer cycles but bigger 0x43 responses. Default 1.
   void set_batch_size(uint8_t n) { user_batch_size_ = (n < 1) ? 1 : n; }
 
+  /// EXPERIMENT — KNOWN HARMFUL, leave OFF. The idea was to skip the
+  /// get-request-normal priming opener on a paired session to save ~15 s.
+  /// Tested 2026-06-11: it does NOT save time and CORRUPTS data. On this meter
+  /// the FIRST GET of a session is always "sacrificial" — it returns 0x5B then
+  /// only 0x40 (no-data) on the req-beacons, and its result is buffered and
+  /// delivered to the NEXT GET. The priming read exists to BE that sacrifice and
+  /// to absorb that one-response lag (its leftover is the stale C4 01 the parser
+  /// rejects, which forces a resend that re-syncs the pipeline). With priming
+  /// skipped, the first real batch is sacrificed instead (Voltage/Current/
+  /// Neutral lost) AND its buffered values land in the next batch with a valid
+  /// C4 03 the guards can't catch (e.g. energy-total published as 237.9). Kept
+  /// only as a documented dead-end. Default off.
+  void set_skip_priming(bool enable) { skip_priming_ = enable; }
+
+  /// EXPERIMENT: skip the closing ("FIN") beacon after each GET response and go
+  /// straight to the next batch. Saves ~4.5 s per batch. Default off.
+  void set_skip_fin_beacons(bool enable) { skip_fin_beacons_ = enable; }
+
   /// General RX wait before declaring "no response" (ms). Governs pairing waits
   /// and frame completion once a reply has started. Default 3000.
   void set_rx_timeout_ms(uint32_t ms) { rx_timeout_ms_ = ms; }
@@ -324,15 +342,29 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   static constexpr uint32_t GET_REQ_BEACON_DELAY_MS_     = 5000;
   static constexpr uint32_t GET_FIN_BEACON_DELAY_MS_     = 4500;
 
+  // FAST PRIMING (experiment). The priming read is a throwaway engagement GET —
+  // its 0x43 data is discarded, so it does NOT need the ~5 s pacing that exists
+  // to let the meter prepare *real* data. We only need enough req-beacon polls
+  // to engage the meter so the first real batch is answered directly. Using a
+  // short delay + few retries cuts priming from ~15 s (3×5 s) to a few seconds.
+  // These apply ONLY while !session_primed_; real batches keep the full pacing.
+  // Tune up if the first real batch starts coming back sacrificial (0x40 no-data).
+  static constexpr uint32_t PRIMING_REQ_BEACON_DELAY_MS_ = 1000;
+  static constexpr uint8_t  PRIMING_MAX_REQ_RETRIES_     = 2;
+
   /* ---- Runtime state ---- */
   State state_{State::NOT_INITIALIZED};
   uint32_t state_entered_ms_{0};
+  uint32_t session_start_ms_{0};  // millis() at update()/start_cycle_(); used to report session length at PUBLISH
   uint8_t retry_count_{0};
   uint8_t resp_fail_retries_{0};  // consecutive unparseable 0x43 responses for the current batch
   // Runtime-configurable (YAML); seeded from the *_DEFAULT_ constants above.
   uint8_t user_batch_size_{USER_BATCH_SIZE_DEFAULT_};
   uint32_t rx_timeout_ms_{RX_TIMEOUT_MS_DEFAULT_};
   uint32_t rx_reply_timeout_ms_{RX_REPLY_TIMEOUT_MS_DEFAULT_};
+  bool skip_priming_{false};       // YAML skip_priming — bypass normal-GET opener on paired sessions
+  bool skip_fin_beacons_{false};   // YAML skip_fin_beacons — no closing beacon between batches
+  bool session_was_paired_{false}; // paired_ snapshot at start_cycle_(); gates skip_priming_ to non-pairing cycles
   uint8_t current_sensor_idx_{0};
   // The firmware maintains TWO independent TX sequence counters (per
   // FRAME_HEADER_SPEC §4 + verified in iq3/f02 pairing capture):

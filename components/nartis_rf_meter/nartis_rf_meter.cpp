@@ -76,6 +76,11 @@ void NartisRfMeterComponent::setup_continue_() {
 }
 
 void NartisRfMeterComponent::start_cycle_() {
+  session_start_ms_ = esphome::millis();  // start of the meter session — measured to PUBLISH
+  // Snapshot whether we entered this cycle already paired. skip_priming_ only
+  // applies to such regular sessions — a cycle that performs pairing this run
+  // still needs the priming opener to engage the meter.
+  session_was_paired_ = paired_;
   current_sensor_idx_ = 0;
   retry_count_ = 0;
   pair_retry_ = 0;
@@ -582,22 +587,52 @@ void NartisRfMeterComponent::handle_state_() {
           }
           rx_parse_retries_ = 0;
           set_state_(State::GET_TX);
-        } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
-                   esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
+        } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_) {
           rx_parse_retries_++;
-          ESP_LOGW(TAG, "Beacon response: noise frame (type=0x%02X, n=%d) — re-arm RX (try %u/%u)",
-                   t, payload_len, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-          start_rx_();
+          if (payload_len >= 0) {
+            // A valid, decoded frame — just not the 0x40 we expected (commonly
+            // 0x53 SESSION_SETUP: the meter wants to re-establish the session).
+            // The meter already sent its reply and won't retransmit on its own,
+            // so re-arming RX is futile — re-send the beacon to prompt a fresh
+            // reply within the same session.
+            ESP_LOGW(TAG, "Beacon response: unexpected frame (type=0x%02X, n=%d) — "
+                          "re-sending beacon (try %u/%u)",
+                     t, payload_len, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
+            set_state_(State::BEACON_TX);
+          } else if (esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
+            // Parse failed (CRC/noise) and the RX window still has time: the
+            // meter's real reply may still be arriving — keep listening.
+            ESP_LOGW(TAG, "Beacon response: noise frame (type=0x%02X, n=%d) — "
+                          "re-arm RX (try %u/%u)",
+                     t, payload_len, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
+            start_rx_();
+          } else {
+            // Window exhausted with nothing decodable — re-send the beacon.
+            ESP_LOGW(TAG, "Beacon response: no decodable reply (last type=0x%02X) — "
+                          "re-sending beacon (try %u/%u)",
+                     t, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
+            set_state_(State::BEACON_TX);
+          }
         } else {
-          ESP_LOGW(TAG, "Beacon response: gave up after %u re-arm attempts (last type=0x%02X)",
+          ESP_LOGW(TAG, "Beacon response: gave up after %u attempts (last type=0x%02X)",
                    rx_parse_retries_, t);
           rx_parse_retries_ = 0;
           set_state_(State::ERROR_RECOVERY);
         }
       } else if (status == RxStatus::ERROR) {
-        ESP_LOGW(TAG, "Beacon RX error/timeout");
-        rx_parse_retries_ = 0;
-        set_state_(State::ERROR_RECOVERY);
+        // No reply at all within the RX window. Re-send the beacon a couple of
+        // times within the session before giving up — a single frame lost to RF
+        // noise shouldn't fail the whole read cycle.
+        if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_) {
+          rx_parse_retries_++;
+          ESP_LOGW(TAG, "Beacon RX error/timeout — re-sending beacon (try %u/%u)",
+                   rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
+          set_state_(State::BEACON_TX);
+        } else {
+          ESP_LOGW(TAG, "Beacon RX error/timeout — gave up after %u attempts", rx_parse_retries_);
+          rx_parse_retries_ = 0;
+          set_state_(State::ERROR_RECOVERY);
+        }
       }
       break;
     }
@@ -627,7 +662,11 @@ void NartisRfMeterComponent::handle_state_() {
           retry_count_ = 0;
           if (handle_get_response_()) {
             resp_fail_retries_ = 0;
-            set_state_(State::GET_FIN_BEACON_TX);
+            if (skip_fin_beacons_) {
+              advance_after_get_();  // experiment: straight to next batch, no closing beacon
+            } else {
+              set_state_(State::GET_FIN_BEACON_TX);
+            }
           } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
             ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
                      resp_fail_retries_, batch_start_idx_);
@@ -663,12 +702,17 @@ void NartisRfMeterComponent::handle_state_() {
     // this time to query its internal OBIS registers and prep the response.
     // Sending the beacon faster than this makes the meter respond with 0x40
     // (cycle-close ack) instead of 0x43 (data response).
-    case State::GET_REQ_BEACON_TX:
-      if (esphome::millis() - state_entered_ms_ < GET_REQ_BEACON_DELAY_MS_) {
+    case State::GET_REQ_BEACON_TX: {
+      // Fast priming: the throwaway priming GET doesn't need the long data-prep
+      // pacing — poll quickly just to engage the meter. Real batches keep 5 s.
+      const uint32_t req_beacon_delay =
+          session_primed_ ? GET_REQ_BEACON_DELAY_MS_ : PRIMING_REQ_BEACON_DELAY_MS_;
+      if (esphome::millis() - state_entered_ms_ < req_beacon_delay) {
         break;
       }
       handle_beacon_tx_();
       break;
+    }
 
     case State::GET_REQ_BEACON_WAIT_TX_DONE:
       handle_wait_tx_done_(State::GET_WAIT_DATA);
@@ -682,7 +726,11 @@ void NartisRfMeterComponent::handle_state_() {
         if (raw_type == 0x43) {
           if (handle_get_response_()) {
             resp_fail_retries_ = 0;
-            set_state_(State::GET_FIN_BEACON_TX);  // closing beacon
+            if (skip_fin_beacons_) {
+              advance_after_get_();  // experiment: straight to next batch, no closing beacon
+            } else {
+              set_state_(State::GET_FIN_BEACON_TX);  // closing beacon
+            }
           } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
             ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
                      resp_fail_retries_, batch_start_idx_);
@@ -696,10 +744,18 @@ void NartisRfMeterComponent::handle_state_() {
           ESP_LOGW(TAG, "GET cycle: unexpected data response (type=0x%02X) — retrying req-beacon",
                    raw_type);
           retry_count_++;
-          if (retry_count_ >= MAX_RETRIES_) {
-            ESP_LOGW(TAG, "GET cycle: max retries on data response — skipping batch (start=%u)",
-                     batch_start_idx_);
-            if (session_primed_) batch_start_idx_ += batch_count_;
+          // Priming only needs to engage the meter; it gets 0x40 no-data by
+          // design, so cap its req-beacon polls low and declare primed early.
+          const uint8_t req_max = session_primed_ ? MAX_RETRIES_ : PRIMING_MAX_REQ_RETRIES_;
+          if (retry_count_ >= req_max) {
+            if (session_primed_) {
+              ESP_LOGW(TAG, "GET cycle: max retries on data response — skipping batch (start=%u)",
+                       batch_start_idx_);
+              batch_start_idx_ += batch_count_;
+            } else {
+              ESP_LOGD(TAG, "GET cycle: priming engaged after %u req-beacon(s) — proceeding",
+                       retry_count_);
+            }
             retry_count_ = 0;
             advance_after_get_();
           } else {
@@ -1110,6 +1166,16 @@ void NartisRfMeterComponent::handle_get_tx_() {
     return;
   }
 
+  // EXPERIMENT (skip_priming_): on a regular, already-paired session, bypass the
+  // get-request-normal opener and go straight to the with-list reads. Restricted
+  // to non-pairing cycles via session_was_paired_ — a freshly-paired meter still
+  // needs the priming handshake.
+  if (skip_priming_ && !session_primed_ && session_was_paired_) {
+    ESP_LOGW(TAG, "GET: skip_priming is ON — KNOWN HARMFUL: first batch becomes the "
+                  "sacrificial read and its values leak into the next batch. Disable it.");
+    session_primed_ = true;
+  }
+
   // ---- Build the current batch ----
   // Two phases:
   //   Phase 0 (!session_primed_): get-request-NORMAL (c0 01, single OBIS).
@@ -1232,14 +1298,27 @@ bool NartisRfMeterComponent::handle_get_response_() {
 
   // For a 0x43 the parse_frame payload is still the nested-encrypted envelope
   // (addr-echo + 01 29 len 00 + counter + ciphertext + tag). Decrypt the inner
-  // DLMS APDU first (non-mutating peek — same decrypt as the RX DLMS log line).
+  // DLMS APDU with the REPLAY-CHECKED parser (not the diagnostic peek): it
+  // rejects any frame whose nested counter is <= the last one we accepted —
+  // i.e. a re-delivered / buffered / lagged 0x43 — and bumps the high-water
+  // mark on accept. This is the definitive "fresh reply for us, not a stale
+  // one" guard: it catches the meter re-handing the previous batch's buffered
+  // response (which would otherwise pass the form + count guards and store the
+  // wrong batch's values, e.g. energy-total showing the Voltage reading).
+  // The final-ack path intentionally receives a same-counter re-delivery but
+  // never calls this function, so it won't be falsely rejected here.
   const uint8_t *dlms_ptr = payload;
   size_t dlms_len = static_cast<size_t>(payload_len);
   uint8_t dlms_buf[MAX_DLMS_APDU_SIZE];
   const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
   if (raw_type == 0x43) {
-    int n = rf_.peek_nested_plain(payload, static_cast<size_t>(payload_len),
-                                  dlms_buf, sizeof(dlms_buf));
+    int n = rf_.parse_nested_encrypted(payload, static_cast<size_t>(payload_len),
+                                       dlms_buf, sizeof(dlms_buf));
+    if (n == static_cast<int>(RfDataLayer::ParseResult::ERR_REPLAY)) {
+      ESP_LOGW(TAG, "0x43 rejected: stale/re-delivered frame (nested counter not newer than "
+                    "last accepted) — ignoring so the batch re-sends for a fresh reply");
+      return false;
+    }
     if (n <= 0) {
       ESP_LOGW(TAG, "0x43 nested decrypt failed (err=%d)", n);
       return false;
@@ -1359,6 +1438,20 @@ void NartisRfMeterComponent::advance_after_get_() {
 }
 
 void NartisRfMeterComponent::handle_publish_() {
+  const uint32_t session_ms = esphome::millis() - session_start_ms_;
+  ESP_LOGI(TAG, "Session with meter: %.1f s (%u ms)", session_ms / 1000.0f, (unsigned) session_ms);
+
+  // Comms with the meter are finished and every TX/RX counter has advanced.
+  // Persist them NOW — before publishing — and force an immediate flush to NVS.
+  // ESPHome's preferences layer normally defers the flash write up to
+  // flash_write_interval (default 60 s); without the forced sync an unexpected
+  // reboot during/after publish would lose this cycle's counter advance and
+  // lean on FRAME_COUNTER_MARGIN_ to recover. Reaching PUBLISH is a healthy
+  // cycle, so clear the re-pair failure streak here too.
+  consecutive_read_failures_ = 0;
+  save_pairing_state_();
+  esphome::global_preferences->sync();  // commit the deferred NVS write right away
+
   ESP_LOGI(TAG, "Publishing sensor values...");
 
   for (auto &entry : sensors_) {
@@ -1381,13 +1474,6 @@ void NartisRfMeterComponent::handle_publish_() {
       entry.text_sensor->publish_state(buf);
     }
   }
-
-  // Reaching PUBLISH is a healthy cycle — clear the re-pair failure streak.
-  consecutive_read_failures_ = 0;
-
-  // Persist the advanced TX/RX counters (and confirm the paired session) so the
-  // next boot resumes exactly where we left off.
-  save_pairing_state_();
 
   // Put radio to sleep between readings
   hal_.go_sleep();
