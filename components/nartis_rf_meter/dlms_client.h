@@ -45,7 +45,11 @@ enum class DlmsDataType : uint8_t {
   ENUM = 0x16,
   STRUCTURE = 0x02,
   ARRAY = 0x01,
+  BIT_STRING = 0x04,
+  BCD = 0x0D,             // binary-coded decimal
   DATE_TIME = 0x19,
+  DATE = 0x1A,
+  TIME = 0x1B,
 };
 
 class DlmsClient {
@@ -103,12 +107,29 @@ class DlmsClient {
   /// @param count_out actual number of results returned by the meter (≤ max_results)
   /// @return true if header parsed OK; individual result slots may carry NONE
   ///         type if their data couldn't be parsed.
+  /// @param class_ids optional array (parallel to the requested attributes, in
+  ///        request order) of COSEM class-ids. When an entry is 8 (Clock) the
+  ///        matching result is decoded as a date-time string instead of ASCII.
+  ///        Pass nullptr to disable class-aware formatting.
   bool parse_read_response_list(const uint8_t *data, size_t len,
                                 DlmsValue *values, uint8_t max_results,
-                                uint8_t *count_out);
+                                uint8_t *count_out,
+                                const uint16_t *class_ids = nullptr);
 
   /// Legacy single-attribute response parser (kept for backwards compat).
   bool parse_read_response(const uint8_t *data, size_t len, DlmsValue *value_out);
+
+  /* ---- Value conversion (shared by all sensors) ---- */
+
+  /// Convert a raw COSEM value (type tag + big-endian value bytes) to a float
+  /// for numeric sensors. Unsupported/compound types return 0.
+  static float data_as_float(DlmsDataType type, const uint8_t *data, size_t len);
+
+  /// Render a raw COSEM value as a human-readable string for text sensors:
+  /// octet/visible/UTF-8 strings as ASCII, date_time as "YYYY-MM-DD HH:MM:SS…",
+  /// numerics printed, bit-string/BCD/date/time hex-dumped.
+  static void data_to_string(DlmsDataType type, const uint8_t *data, size_t len,
+                             char *buffer, size_t buf_size);
 
   /* ---- State ---- */
 
@@ -118,7 +139,10 @@ class DlmsClient {
 
  private:
   /// Parse a DLMS typed value at data[offset]. Returns bytes consumed, or -1 on error.
-  static int parse_typed_value(const uint8_t *data, size_t len, DlmsValue *value_out);
+  /// `class_hint` is the COSEM class-id of the source attribute (0 = unknown);
+  /// when 8 (Clock), a 12-byte octet-string is decoded as a date-time string.
+  static int parse_typed_value(const uint8_t *data, size_t len, DlmsValue *value_out,
+                               uint16_t class_hint = 0);
 
   DlmsState state_{DlmsState::IDLE};
   uint16_t client_addr_{16};

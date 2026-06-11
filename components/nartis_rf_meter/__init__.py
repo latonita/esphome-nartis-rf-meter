@@ -19,27 +19,9 @@ CONF_CIU_SERIAL = "ciu_serial"
 CONF_CIU_ADDRESS = "ciu_address"
 CONF_FIX_CHANNEL = "fix_channel"
 CONF_USE_NON_STANDARD_CHANNELS = "use_non_standard_channels"
-CONF_INITIAL_TIME = "initial_time"
 CONF_BATCH_SIZE = "batch_size"
 CONF_RX_TIMEOUT = "rx_timeout"
 CONF_RX_REPLY_TIMEOUT = "rx_reply_timeout"
-
-
-def validate_initial_time(value):
-    """Default wall-clock to seed the system clock with at boot (no NTP/WiFi).
-    Accepts 'YYYY-MM-DD HH:MM:SS' (interpreted as UTC) and stores epoch seconds.
-    The meter requires a live, advancing clock in the beacon before it delivers
-    data; this seeds one so the timestamp ticks even without a network time source."""
-    import datetime
-
-    s = cv.string_strict(value)
-    try:
-        dt = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-    except ValueError as err:
-        raise cv.Invalid(
-            f"initial_time must be 'YYYY-MM-DD HH:MM:SS' (UTC); got '{s}'"
-        ) from err
-    return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
@@ -89,10 +71,6 @@ CONFIG_SCHEMA = cv.Schema(
             # RX presets are 97..278 kHz off where this meter actually replies and
             # miss it; these centres + 100 kHz BW + AFC capture it. Default: off.
             cv.Optional(CONF_USE_NON_STANDARD_CHANNELS, default=False): cv.boolean,
-            # Default wall-clock (UTC) to seed the system clock with at boot when
-            # there's no NTP/RTC source. The beacon carries a live clock the meter
-            # checks for freshness — without an advancing clock it refuses data.
-            cv.Optional(CONF_INITIAL_TIME): validate_initial_time,
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
@@ -141,9 +119,6 @@ async def to_code(config):
         cg.add(var.set_fix_channel(config[CONF_FIX_CHANNEL]))
 
     cg.add(var.set_use_non_standard_channels(config[CONF_USE_NON_STANDARD_CHANNELS]))
-
-    if CONF_INITIAL_TIME in config:
-        cg.add(var.set_initial_epoch(config[CONF_INITIAL_TIME]))
 
     cg.add(var.set_batch_size(config[CONF_BATCH_SIZE]))
     cg.add(var.set_rx_timeout_ms(config[CONF_RX_TIMEOUT]))

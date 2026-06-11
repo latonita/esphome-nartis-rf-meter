@@ -96,11 +96,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     hal_.set_use_custom_channels(enable);
   }
 
-  /// Seed the system clock at boot (epoch seconds, UTC) when no NTP/RTC time
-  /// source is available. The beacon carries a live wall-clock the meter checks
-  /// for freshness; without an advancing clock the meter refuses data (0x40).
-  void set_initial_epoch(uint32_t epoch) { initial_epoch_ = epoch; }
-
   /// User-defined OBIS attributes read per get-request-with-list (1..10). Larger
   /// batches mean fewer cycles but bigger 0x43 responses. Default 1.
   void set_batch_size(uint8_t n) { user_batch_size_ = (n < 1) ? 1 : n; }
@@ -287,7 +282,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   std::string ciu_serial_;  // empty = use ESP32 MAC address
   std::string ciu_address_; // optional 16-hex-char full CIU address override
   int8_t fix_channel_{-1};  // active-mode pinned channel (0..3); -1 = RSSI auto-scan
-  uint32_t initial_epoch_{0};         // YAML-seeded boot clock (UTC epoch); 0 = none
   RfAddress address_{};
   uint8_t aes_key_[AES_KEY_SIZE]{};
 

@@ -32,10 +32,11 @@ wifi:
     ssid: "Nartis-RF-Fallback"
     password: !secret fallback_password
 
-# Time source — needed for beacon RTC timestamp
-time:
-  - platform: homeassistant
-    id: homeassistant_time
+# Time source is OPTIONAL. The component synthesizes an advancing clock for the
+# beacon timestamp on its own; if a real time source is present it uses that.
+#time:
+#  - platform: homeassistant
+#    id: homeassistant_time
 
 # Web server for easy debugging without HA
 web_server:

@@ -12,7 +12,6 @@
 
 #include <cstring>
 #include <ctime>
-#include <sys/time.h>
 
 namespace esphome::nartis_rf_meter {
 
@@ -27,21 +26,6 @@ static const LogString *state_to_str(NartisRfMeterComponent::State s);
  * ================================================================ */
 
 void NartisRfMeterComponent::setup() {
-  // Seed the system clock from the YAML-configured default time if it isn't
-  // already valid (e.g. no NTP/WiFi). The beacon embeds a live wall-clock the
-  // meter checks for freshness; once seeded, ::time() advances on its own and
-  // the beacon timestamp ticks, which is what unlocks data delivery. An NTP or
-  // RTC time source, if present, will overwrite this with real time.
-  if (initial_epoch_ != 0) {
-    time_t nowt = ::time(nullptr);
-    if (esphome::ESPTime::from_epoch_utc(nowt).year < 2024) {
-      struct timeval tv = {};
-      tv.tv_sec = static_cast<time_t>(initial_epoch_);
-      settimeofday(&tv, nullptr);
-      ESP_LOGI(TAG, "Seeded system clock from initial_time (epoch=%u)", (unsigned) initial_epoch_);
-    }
-  }
-
   ESP_LOGI(TAG, "Nartis RF Meter: deferring init 2s for network log viewers...");
   this->set_timeout(2000, [this]() { this->setup_continue_(); });
 }
@@ -154,18 +138,22 @@ void NartisRfMeterComponent::reset_pairing_state_() {
 void NartisRfMeterComponent::load_pairing_state_() {
   NvsPairingState s{};
   if (!pref_.load(&s)) {
-    ESP_LOGI(TAG, "No saved session in NVS — will pair on first cycle.");
+    ESP_LOGI(TAG, "Pairing restore: NONE — no saved session in NVS, will pair on first cycle");
     return;
   }
-  if (s.version != NVS_STATE_VERSION_ || !s.paired) {
-    ESP_LOGI(TAG, "Saved session not usable (version=%u, paired=%u) — will pair.",
-             (unsigned) s.version, (unsigned) s.paired);
+  if (s.version != NVS_STATE_VERSION_) {
+    ESP_LOGW(TAG, "Pairing restore: FAIL — NVS version %u != expected %u, will re-pair",
+             (unsigned) s.version, (unsigned) NVS_STATE_VERSION_);
+    return;
+  }
+  if (!s.paired) {
+    ESP_LOGI(TAG, "Pairing restore: NONE — saved session marked unpaired, will pair");
     return;
   }
   // Guard against a key saved for a different meter (config changed): the key's
   // first 12 bytes are the meter serial in ASCII.
   if (meter_serial_.size() >= 12 && memcmp(s.aes_key, meter_serial_.c_str(), 12) != 0) {
-    ESP_LOGW(TAG, "Saved session key serial mismatch — ignoring, will re-pair.");
+    ESP_LOGW(TAG, "Pairing restore: FAIL — saved key is for a different meter serial, will re-pair");
     return;
   }
 
@@ -184,11 +172,10 @@ void NartisRfMeterComponent::load_pairing_state_() {
   // (one frame) and reuses the restored key/counters.
   session_primed_ = false;
 
-  ESP_LOGI(TAG, "Restored paired session from NVS: frame_counter=%u (+%u margin), "
-                "rx=%u, nested_rx=%u, meter=%s",
+  ESP_LOGI(TAG, "Pairing restore: OK — meter=%s, frame_counter=%u (+%u margin), rx=%u, nested_rx=%u",
+           format_hex_pretty(s.meter_addr, 8).c_str(),
            (unsigned) s.frame_counter, (unsigned) FRAME_COUNTER_MARGIN_,
-           (unsigned) s.last_rx_counter, (unsigned) s.last_nested_rx_counter,
-           format_hex_pretty(s.meter_addr, 8).c_str());
+           (unsigned) s.last_rx_counter, (unsigned) s.last_nested_rx_counter);
 }
 
 void NartisRfMeterComponent::save_pairing_state_() {
@@ -1264,10 +1251,23 @@ bool NartisRfMeterComponent::handle_get_response_() {
   }
 
   DlmsValue values[DlmsClient::MAX_LIST_ATTRS];
-  for (auto &v : values) v.type = DlmsValue::NONE;
+  for (auto &v : values) v.valid = false;
+
+  // Per-attribute COSEM class hints (in batch order) so the parser can render a
+  // class-8 (Clock) octet-string as a date-time. Only meaningful for user reads;
+  // the priming read is discarded, so it passes no hints.
+  uint16_t class_ids[DlmsClient::MAX_LIST_ATTRS] = {0};
+  if (session_primed_) {
+    for (uint8_t i = 0; i < batch_count_ && i < DlmsClient::MAX_LIST_ATTRS &&
+                        (batch_start_idx_ + i) < sensors_.size(); i++) {
+      class_ids[i] = sensors_[batch_start_idx_ + i].class_id;
+    }
+  }
+
   uint8_t got_count = 0;
-  bool ok = dlms_.parse_read_response_list(dlms_ptr, dlms_len,
-                                           values, DlmsClient::MAX_LIST_ATTRS, &got_count);
+  bool ok = dlms_.parse_read_response_list(dlms_ptr, dlms_len, values,
+                                           DlmsClient::MAX_LIST_ATTRS, &got_count,
+                                           session_primed_ ? class_ids : nullptr);
   if (!ok) {
     ESP_LOGW(TAG, "parse_read_response_list rejected the payload");
     return false;
@@ -1279,9 +1279,10 @@ bool NartisRfMeterComponent::handle_get_response_() {
   } else {
     // Store each result into the corresponding user-sensor slot.
     for (uint8_t i = 0; i < got_count && (batch_start_idx_ + i) < sensors_.size(); i++) {
-      if (values[i].type != DlmsValue::NONE) {
+      if (values[i].has_value()) {
         sensors_[batch_start_idx_ + i].last_value = values[i];
-        ESP_LOGI(TAG, "  sensor[%u] value OK (type=%d)", batch_start_idx_ + i, values[i].type);
+        ESP_LOGI(TAG, "  sensor[%u] value OK (dlms_type=0x%02X, %u B)",
+                 batch_start_idx_ + i, values[i].dtype, values[i].raw_len);
       } else {
         ESP_LOGW(TAG, "  sensor[%u] no value (compound type or parse-fail)", batch_start_idx_ + i);
       }
@@ -1353,40 +1354,21 @@ void NartisRfMeterComponent::handle_publish_() {
   for (auto &entry : sensors_) {
     if (!entry.last_value.has_value()) continue;
 
+    const auto dtype = static_cast<DlmsDataType>(entry.last_value.dtype);
+    const uint8_t *raw = entry.last_value.raw;
+    const size_t rlen = entry.last_value.raw_len;
+
+    // Numeric sensor: one shared converter handles every scalar DLMS type.
     if (entry.sensor) {
-      float val = 0.0f;
-      switch (entry.last_value.type) {
-        case DlmsValue::FLOAT_VAL:
-          val = entry.last_value.float_val;
-          break;
-        case DlmsValue::INT_VAL:
-          val = static_cast<float>(entry.last_value.int_val);
-          break;
-        case DlmsValue::UINT_VAL:
-          val = static_cast<float>(entry.last_value.uint_val);
-          break;
-        default:
-          continue;
-      }
-      entry.sensor->publish_state(val);
+      entry.sensor->publish_state(DlmsClient::data_as_float(dtype, raw, rlen));
     }
 
+    // Text sensor: shared converter renders strings/date-time/numerics. The
+    // user picks the interpretation by setting obis_class (e.g. 8 = Clock).
     if (entry.text_sensor) {
-      if (entry.last_value.type == DlmsValue::STRING_VAL) {
-        entry.text_sensor->publish_state(entry.last_value.str_val);
-      } else {
-        // Convert numeric to string
-        char buf[32];
-        if (entry.last_value.type == DlmsValue::FLOAT_VAL)
-          snprintf(buf, sizeof(buf), "%.3f", entry.last_value.float_val);
-        else if (entry.last_value.type == DlmsValue::INT_VAL)
-          snprintf(buf, sizeof(buf), "%d", (int) entry.last_value.int_val);
-        else if (entry.last_value.type == DlmsValue::UINT_VAL)
-          snprintf(buf, sizeof(buf), "%u", (unsigned) entry.last_value.uint_val);
-        else
-          continue;
-        entry.text_sensor->publish_state(buf);
-      }
+      char buf[64];
+      DlmsClient::data_to_string(dtype, raw, rlen, buf, sizeof(buf));
+      entry.text_sensor->publish_state(buf);
     }
   }
 
@@ -1531,20 +1513,21 @@ size_t NartisRfMeterComponent::build_beacon_payload_(uint8_t *out, size_t max) {
 }
 
 void NartisRfMeterComponent::build_rtc_timestamp_(uint8_t *out) {
-  // The meter requires a LIVE, advancing wall-clock here. Confirmed against
-  // real-CIU beacons (dump-spi2): the field ticks +6 s per beacon in perfect
-  // sync with real time (e.g. 00:04:58 → 00:05:04 → …). A frozen/zero value
-  // makes the meter keepalive the request but refuse the data (0x40, never 0x43).
+  // The meter only requires a LIVE, ADVANCING clock here — not the real
+  // wall-clock. Confirmed against real-CIU beacons (dump-spi2): the field ticks
+  // forward each beacon; a frozen/zero value makes the meter keepalive the
+  // request but refuse the data (0x40, never 0x43).
+  //
+  // So we don't depend on NTP/RTC: if a real time source happens to be present
+  // we use it, otherwise we synthesize an advancing clock from millis() on top
+  // of a fixed base epoch. Either way the timestamp keeps moving, which is all
+  // the meter checks.
+  static constexpr uint32_t SYNTHETIC_BASE_EPOCH = 1704067200;  // 2024-01-01 00:00:00 UTC
   time_t epoch = ::time(nullptr);
   auto now = esphome::ESPTime::from_epoch_utc(epoch);
-  if (!now.is_valid()) {
-    // No clock set — emit zeros and warn. Configure `initial_time:` (seeds the
-    // system clock at boot) or add an NTP/RTC time source. Data reads will fail
-    // until the clock advances.
-    ESP_LOGW(TAG, "RTC timestamp not available (system clock unset) — beacon clock is zero; "
-                  "meter will NOT deliver data. Set 'initial_time:' or add a time source.");
-    memset(out, 0, 6);
-    return;
+  if (!now.is_valid() || now.year < 2024) {
+    epoch = static_cast<time_t>(SYNTHETIC_BASE_EPOCH + esphome::millis() / 1000U);
+    now = esphome::ESPTime::from_epoch_utc(epoch);
   }
 
   uint8_t yr  = now.year % 100;

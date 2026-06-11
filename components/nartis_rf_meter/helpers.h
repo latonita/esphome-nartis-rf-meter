@@ -236,14 +236,17 @@ struct ObisCode {
 /* ================================================================
  * DLMS Value — parsed response data
  * ================================================================ */
+// A parsed COSEM attribute value, kept as the RAW on-the-wire bytes plus the
+// DLMS type tag. Interpretation (→ float for sensors, → string for text
+// sensors) is deferred to DlmsClient::data_as_float() / data_to_string(), so
+// every consumer shares one battle-tested conversion. `dtype` is stored as the
+// raw type byte (helpers.h can't see the DlmsDataType enum); cast when used.
 struct DlmsValue {
-  enum Type : uint8_t { NONE = 0, FLOAT_VAL, INT_VAL, UINT_VAL, STRING_VAL };
-  Type type{NONE};
-  float float_val{0.0f};
-  int32_t int_val{0};
-  uint32_t uint_val{0};
-  char str_val[64]{};
-  bool has_value() const { return type != NONE; }
+  uint8_t dtype{0x00};   // DLMS data-type tag (0x00 = null / no value)
+  uint8_t raw_len{0};    // valid bytes in raw[]
+  uint8_t raw[64]{};     // value bytes, big-endian as received
+  bool valid{false};     // false ⇒ NULL-data / unparsed
+  bool has_value() const { return valid; }
 };
 
 /* ================================================================
