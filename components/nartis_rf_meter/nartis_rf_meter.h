@@ -197,20 +197,15 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /* ---- RX channel-hop acquisition ----
    * The meter's reply carrier is stable WITHIN a session but wanders up to
    * ~650 kHz BETWEEN sessions, landing 97..278 kHz off the firmware RX presets.
-   * When enabled, we walk the (custom) RX channels on each unanswered probe and
-   * LOCK onto whichever channel first yields a reply, for the rest of the session.
+   * When enabled, we walk the RX channels on each unanswered probe and LOCK
+   * onto whichever channel first yields a reply, for the rest of the session.
    *
-   * Only active with non-standard channels (custom presets share one TX freq of
-   * 433.82 MHz, so hopping moves RX only and never changes the probe frequency)
-   * and no explicit fix_channel pin.
+   * Active whenever no channel is pinned (fix_channel < 0), independent of
+   * which channel table is in use. Hops move RX only — TX stays on Ch0/433.82,
+   * the meter's wake frequency — so it's safe for both the firmware presets
+   * and the custom presets.
    */
-  bool channel_hopping_enabled_() const {
-    // Hop the RX channel to acquire the meter whenever a channel isn't pinned —
-    // independent of which channel table is in use. Hops move RX only (TX stays
-    // on Ch0/433.82, the meter's wake frequency), so it's safe for both the
-    // firmware presets and the custom presets.
-    return fix_channel_ < 0;
-  }
+  bool channel_hopping_enabled_() const { return fix_channel_ < 0; }
   /// Advance RX to the next channel before a retry probe. No-op if hopping is
   /// disabled or the channel is already locked. Returns true if it hopped.
   bool hop_channel_();

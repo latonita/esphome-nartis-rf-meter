@@ -341,8 +341,6 @@ void NartisRfMeterComponent::set_state_(State new_state) {
 }
 
 void NartisRfMeterComponent::handle_state_() {
-  uint32_t elapsed = esphome::millis() - state_entered_ms_;
-
   switch (state_) {
     case State::RSSI_SCAN:
       handle_rssi_scan_();
