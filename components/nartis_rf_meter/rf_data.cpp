@@ -758,45 +758,6 @@ int RfDataLayer::peek_nested_plain(const uint8_t *payload, size_t payload_len,
 }
 
 /* ================================================================
- * RX-type classification & test-ping handling
- * ================================================================ */
-
-RfDataLayer::RxClass RfDataLayer::classify_rx_type(uint8_t b1) {
-  switch (b1) {
-    case 0x06: return RxClass::PING;
-    case 0x40: return RxClass::SHORT_ACK;
-    case 0x43: return RxClass::LARGE_RESPONSE;
-    case 0x53: return RxClass::SESSION_SETUP;
-    case 0x5B: return RxClass::KEEPALIVE;
-    default:   return RxClass::UNKNOWN;
-  }
-}
-
-/// Test-ping detection — matches firmware master_rx_handler @ 0xC254
-/// special-case branch. The meter sends:
-///   in[0] ∈ {0x11, 0x13}, in[1] == 'h' (0x68), in[16] == 0x16
-/// The CIU's response is to increment byte[0], stamp the channel/quality at
-/// byte[0x12], and retransmit the first 0x13 bytes.
-bool RfDataLayer::is_test_ping(const uint8_t *in, size_t in_len) {
-  if (in == nullptr || in_len < 0x13) return false;
-  if (in[0] != 0x11 && in[0] != 0x13) return false;
-  if (in[1] != 'h') return false;
-  if (in[0x10] != 0x16) return false;
-  return true;
-}
-
-size_t RfDataLayer::build_test_ping_response(uint8_t *buf, size_t buf_max) {
-  if (buf == nullptr || buf_max < 0x13) return 0;
-  if (!is_test_ping(buf, 0x13)) return 0;
-  // Firmware does: rx_buf[0] += 1; rx_buf[0x12] = channel_id_lookup(rssi); retransmit 0x13B.
-  buf[0]    = static_cast<uint8_t>(buf[0] + 1);
-  // The "quality" byte at [0x12] is the 6-bit-clamped quality from current RSSI.
-  uint8_t q = compose_channel_byte(0, last_rssi_dbm_) & 0x3F;
-  buf[0x12] = q;
-  return 0x13;
-}
-
-/* ================================================================
  * Channel Selection
  * ================================================================ */
 uint8_t RfDataLayer::select_best_channel(const int8_t rssi[4]) {

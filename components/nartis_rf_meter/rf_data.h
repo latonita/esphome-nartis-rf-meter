@@ -106,18 +106,6 @@ class RfDataLayer {
 
   /* ---- RX Path ---- */
 
-  /// RX-frame classification — mirrors firmware comm_event_handler dispatch.
-  /// Set by parse_frame() in the type_out parameter so callers can react
-  /// without re-parsing byte[1].
-  enum class RxClass : uint8_t {
-    UNKNOWN       = 0,
-    PING          = 0x06,  // pairing/health ping (handled specially)
-    SHORT_ACK     = 0x40,  // '@' short ack
-    LARGE_RESPONSE = 0x43, // 'C' large response (carries nested encrypted in plain payload)
-    SESSION_SETUP = 0x53,  // 'S' session setup / key install
-    KEEPALIVE     = 0x5B,  // '[' keepalive
-  };
-
   /// Result codes mirroring firmware parser return values + replay reject.
   enum class ParseResult : int {
     OK              =  0,
@@ -141,7 +129,7 @@ class RfDataLayer {
   ///
   /// Returns payload length on success, or a negative ParseResult value
   /// (cast to int) on error. The `type_out` is set to byte[1] cast to
-  /// RfFrameType; for richer classification use classify_rx_type().
+  /// RfFrameType.
   int parse_frame(const uint8_t *in, size_t in_len,
                   uint8_t *payload_out, size_t payload_max,
                   RfFrameType *type_out);
@@ -160,22 +148,6 @@ class RfDataLayer {
   /// real handler parses the frame. Returns plaintext length, or <0.
   int peek_nested_plain(const uint8_t *payload, size_t payload_len,
                         uint8_t *plain_out, size_t plain_max) const;
-
-  /// Classify a byte[1] value into an RxClass. Returns UNKNOWN for any
-  /// value not in the firmware's comm_event_handler dispatch table.
-  static RxClass classify_rx_type(uint8_t b1);
-
-  /// Detect the firmware's special "test ping" frame.
-  /// The meter sends a frame with rx_buf[0]∈{0x11,0x13}, rx_buf[1]=='h',
-  /// rx_buf[0x10]==0x16. Master's response: increment byte[0], stamp the
-  /// current RSSI quality at byte[0x12], retransmit 19 bytes.
-  /// Returns true if `in` matches this pattern; caller should use
-  /// build_test_ping_response() to construct a reply.
-  static bool is_test_ping(const uint8_t *in, size_t in_len);
-
-  /// Build a reply to a test ping in-place; `buf` must be at least 0x13 bytes.
-  /// Returns total reply length (0x13) on success, 0 on bad input.
-  size_t build_test_ping_response(uint8_t *buf, size_t buf_max);
 
   /* ---- Channel Management ---- */
 

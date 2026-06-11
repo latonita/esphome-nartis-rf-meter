@@ -94,7 +94,6 @@ void NartisRfMeterComponent::abort_to_idle_(const char *reason) {
   ESP_LOGW(TAG, "%s — returning to IDLE, will retry on next update().", reason);
   finish_rx_();
   hal_.go_sleep();
-  dlms_.reset();
   note_cycle_failure_();
   // Persist whatever counter advances this (failed) cycle made so the meter
   // never sees a replayed counter after a reboot. note_cycle_failure_() may have
@@ -1420,7 +1419,6 @@ void NartisRfMeterComponent::handle_publish_() {
 
   // Put radio to sleep between readings
   hal_.go_sleep();
-  dlms_.reset();
   set_state_(State::IDLE);
   ESP_LOGI(TAG, "Read cycle complete");
 }
