@@ -201,6 +201,8 @@ class RfDataLayer {
 
   static const uint16_t crc_table_[256];
 
+  mutable uint8_t work_[MAX_RF_FRAME_SIZE]{};
+
   RfAddress address_{};
   RfAddress meter_address_{};
   bool meter_address_set_{false};

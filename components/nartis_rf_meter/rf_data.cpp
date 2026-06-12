@@ -531,8 +531,8 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
   }
 
   // Copy to a working buffer (CRC strip is in-place).
-  uint8_t work[MAX_RF_FRAME_SIZE];
-  if (frame_size > sizeof(work)) {
+  uint8_t *const work = work_;
+  if (frame_size > sizeof(work_)) {
     ESP_LOGW(TAG, "Frame size %u > working buffer", static_cast<unsigned>(frame_size));
     return static_cast<int>(ParseResult::ERR_LEN);
   }
@@ -685,8 +685,8 @@ int RfDataLayer::parse_nested_encrypted(const uint8_t *payload, size_t payload_l
     return static_cast<int>(ParseResult::ERR_REPLAY);
   }
 
-  uint8_t work[MAX_RF_FRAME_SIZE];
-  if (enc_data_len + AES_TAG_SIZE > sizeof(work)) return static_cast<int>(ParseResult::ERR_LEN);
+  uint8_t *const work = work_;
+  if (enc_data_len + AES_TAG_SIZE > sizeof(work_)) return static_cast<int>(ParseResult::ERR_LEN);
   memcpy(work, payload + 16, enc_data_len + AES_TAG_SIZE);
 
   int dec_len = aes_gcm_decrypt(work, enc_data_len + AES_TAG_SIZE, counter);
@@ -712,8 +712,8 @@ int RfDataLayer::peek_nested_plain(const uint8_t *payload, size_t payload_len,
                      static_cast<uint32_t>(payload[15]);
   if (16 + static_cast<size_t>(enc_data_len) + AES_TAG_SIZE > payload_len) return -1;
   if (enc_data_len > plain_max) return -1;
-  uint8_t work[MAX_RF_FRAME_SIZE];
-  if (static_cast<size_t>(enc_data_len) + AES_TAG_SIZE > sizeof(work)) return -1;
+  uint8_t *const work = work_;
+  if (static_cast<size_t>(enc_data_len) + AES_TAG_SIZE > sizeof(work_)) return -1;
   memcpy(work, payload + 16, static_cast<size_t>(enc_data_len) + AES_TAG_SIZE);
   uint8_t nonce[AES_NONCE_SIZE];
   build_nonce(nonce, address_, counter);

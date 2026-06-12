@@ -78,7 +78,8 @@ void NartisRfMeterComponent::start_cycle_() {
   // once per power-on), so it's NOT reset here.
   batch_start_idx_ = 0;
   batch_count_ = 0;
-  // With a pinned channel, skip the RSSI scan and go straight to channel setup.  
+  for (auto &entry : sensors_) entry.last_value = DlmsValue{};
+  // With a pinned channel, skip the RSSI scan and go straight to channel setup.
   set_state_(fix_channel_ >= 0 ? State::CHANNEL_SELECT : State::RSSI_SCAN);
 }
 
@@ -386,9 +387,9 @@ void NartisRfMeterComponent::handle_state_() {
     case State::PAIR_PROBE_WAIT_RESPONSE: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
-        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
-        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
         // Fall back to raw frame-type byte on parse failure (CRC/length errors
         // from noise-corrupted frames). For the simple 0x06 presence-ack the
         // routing decision only needs the type byte; we don't read the payload.
@@ -441,9 +442,9 @@ void NartisRfMeterComponent::handle_state_() {
     case State::PAIR_ACK_WAIT_RESPONSE: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
-        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
-        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
         // Determine type from parsed value when available; on parse failure
         // (CRC/length error from a noise-corrupted frame), fall back to raw
         // byte [1]. The transport-layer routing decision only needs the
@@ -523,9 +524,9 @@ void NartisRfMeterComponent::handle_state_() {
     case State::PAIR_WAIT_KEEPALIVE: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
-        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
-        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
         // Expected: 0x5B keepalive. Accept type-byte match even on CRC fail.
@@ -566,9 +567,9 @@ void NartisRfMeterComponent::handle_state_() {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         ESP_LOGI(TAG, "Beacon response received (%d bytes)", (int) rx_accum_len_);
-        uint8_t payload[MAX_DLMS_APDU_SIZE];
+        uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
-        int payload_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+        int payload_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (payload_len >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
 
@@ -791,8 +792,6 @@ void NartisRfMeterComponent::handle_state_() {
 }
 
 void NartisRfMeterComponent::handle_rssi_scan_() {
-  // The meter's channel-select routine takes 7 RSSI readings per channel,
-  // removes min and max outliers, averages the remaining 4.
   if (rssi_scan_ch_ == 0) {
     ESP_LOGD(TAG, "Scanning RSSI on 4 channels...");
   }
@@ -810,7 +809,6 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
   }
   hal_.go_standby();
 
-  // Remove min and max, average remaining 4
   int8_t min_r = readings[0], max_r = readings[0];
   int sum = 0;
   for (int i = 0; i < 7; i++) {
@@ -1241,9 +1239,9 @@ bool NartisRfMeterComponent::handle_get_response_() {
   ESP_LOGD(TAG, "GET response received (%d bytes, batch_count=%u)",
            (int) rx_accum_len_, batch_count_);
 
-  uint8_t payload[MAX_DLMS_APDU_SIZE];
+  uint8_t *const payload = rx_payload_buf_;
   RfFrameType rx_type;
-  int payload_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(payload), &rx_type);
+  int payload_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
   if (payload_len < 0) {
     ESP_LOGW(TAG, "Failed to parse response frame (type=0x%02X, err=%d)",
              rx_accum_len_ > 1 ? rx_accum_buf_[1] : 0, payload_len);
@@ -1266,11 +1264,11 @@ bool NartisRfMeterComponent::handle_get_response_() {
   // never calls this function, so it won't be falsely rejected here.
   const uint8_t *dlms_ptr = payload;
   size_t dlms_len = static_cast<size_t>(payload_len);
-  uint8_t dlms_buf[MAX_DLMS_APDU_SIZE];
+  uint8_t *const dlms_buf = rx_dlms_buf_;
   const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
   if (raw_type == 0x43) {
     int n = rf_.parse_nested_encrypted(payload, static_cast<size_t>(payload_len),
-                                       dlms_buf, sizeof(dlms_buf));
+                                       dlms_buf, sizeof(rx_dlms_buf_));
     if (n == static_cast<int>(RfDataLayer::ParseResult::ERR_REPLAY)) {
       ESP_LOGW(TAG, "0x43 rejected: stale/re-delivered frame (nested counter not newer than "
                     "last accepted) — ignoring so the batch re-sends for a fresh reply");
@@ -1286,13 +1284,14 @@ bool NartisRfMeterComponent::handle_get_response_() {
              format_hex_pretty(dlms_buf, dlms_len).c_str());
   }
 
-  DlmsValue values[DlmsClient::MAX_LIST_ATTRS];
-  for (auto &v : values) v.valid = false;
+  DlmsValue *const values = rx_values_;
+  for (uint8_t i = 0; i < DlmsClient::MAX_LIST_ATTRS; i++) values[i].valid = false;
 
   // Per-attribute COSEM class hints (in batch order) so the parser can render a
   // class-8 (Clock) octet-string as a date-time. Only meaningful for user reads;
   // the priming read is discarded, so it passes no hints.
-  uint16_t class_ids[DlmsClient::MAX_LIST_ATTRS] = {0};
+  uint16_t *const class_ids = rx_class_ids_;
+  memset(class_ids, 0, sizeof(rx_class_ids_));
   if (session_primed_) {
     for (uint8_t i = 0; i < batch_count_ && i < DlmsClient::MAX_LIST_ATTRS &&
                         (batch_start_idx_ + i) < sensors_.size(); i++) {
@@ -1344,29 +1343,19 @@ bool NartisRfMeterComponent::handle_get_response_() {
 }
 
 void NartisRfMeterComponent::skip_current_batch_() {
-  // Force progress past a batch whose response we couldn't parse, so the GET
-  // cycle always terminates instead of re-querying the same batch forever.
-  // (session-priming progression is handled by advance_after_get_ itself.)
   if (session_primed_) {
     batch_start_idx_ += batch_count_;  // skip this user batch
   }
 }
 
 void NartisRfMeterComponent::advance_after_get_() {
-  // Priming complete: the meter has now engaged (we ran one full normal-get
-  // cycle). Mark the session primed and continue to the first with-list read.
   if (!session_primed_) {
     session_primed_ = true;
     ESP_LOGD(TAG, "Session primed — proceeding to with-list reads");
-    // The session is now proven working end-to-end (handshake + priming read).
-    // Persist it so a reboot resumes without re-pairing. (session_primed_ itself
-    // is not stored — a restored session always re-primes once.)
     save_pairing_state_();
     set_state_(State::GET_TX);
     return;
   }
-  // Batch-driven progression: batch_start_idx_ has been bumped by
-  // handle_get_response_; keep cycling GET_TX until all user sensors are read.
   if (batch_start_idx_ >= sensors_.size()) {
     set_state_(State::PUBLISH);
   } else {
@@ -1713,10 +1702,10 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
     // accept any parse_frame result here (CRC fail, decrypt fail, etc.) and
     // just print what came out.
     if (rx_accum_len_ > 1) {
-      uint8_t peek_buf[MAX_DLMS_APDU_SIZE];
+      uint8_t *const peek_buf = rx_payload_buf_;
       RfFrameType peek_type;
       int peek_len = rf_.parse_frame(rx_accum_buf_, rx_accum_len_,
-                                     peek_buf, sizeof(peek_buf), &peek_type);
+                                     peek_buf, sizeof(rx_payload_buf_), &peek_type);
       const uint8_t raw_type = rx_accum_buf_[1];
       if (peek_len > 0) {
         ESP_LOGV(TAG, "RX decoded (type=0x%02X, %d B plain%s): %s",
@@ -1726,8 +1715,8 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
         // Third line: for 0x43 the outer payload still wraps a nested-encrypted
         // DLMS APDU — decrypt it (non-mutating peek) and dump the inner plaintext.
         if (raw_type == 0x43) {
-          uint8_t dlms_buf[MAX_DLMS_APDU_SIZE];
-          int dlms_len = rf_.peek_nested_plain(peek_buf, peek_len, dlms_buf, sizeof(dlms_buf));
+          uint8_t *const dlms_buf = rx_dlms_buf_;
+          int dlms_len = rf_.peek_nested_plain(peek_buf, peek_len, dlms_buf, sizeof(rx_dlms_buf_));
           if (dlms_len > 0) {
             ESP_LOGV(TAG, "RX DLMS (%d B): %s", dlms_len,
                      format_hex_pretty(dlms_buf, dlms_len).c_str());

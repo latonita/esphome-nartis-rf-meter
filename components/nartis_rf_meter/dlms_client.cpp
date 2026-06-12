@@ -83,10 +83,10 @@ size_t DlmsClient::build_get_request_with_list(uint8_t *out, size_t max,
     out[pos++] = 0x00;  // access-selector = none
   }
 
-  ESP_LOGD(TAG, "Built get-request-with-list: count=%d (%d bytes)", count, (int) pos);
+  ESP_LOGV(TAG, "Built get-request-with-list: count=%d (%d bytes)", count, (int) pos);
   for (uint8_t i = 0; i < count; i++) {
     const AttrSpec &a = attrs[i];
-    ESP_LOGD(TAG, "  [%d] class=%u OBIS=%u.%u.%u.%u.%u.%u attr=%u",
+    ESP_LOGV(TAG, "  [%d] class=%u OBIS=%u.%u.%u.%u.%u.%u attr=%u",
              i, a.class_id, a.obis.bytes[0], a.obis.bytes[1], a.obis.bytes[2],
              a.obis.bytes[3], a.obis.bytes[4], a.obis.bytes[5], a.attr_id);
   }
@@ -423,8 +423,10 @@ static void format_cosem_datetime(const uint8_t *data, size_t len,
     advance(snprintf(buffer + pos, buf_size - pos, "%02u", second));
   else
     advance(snprintf(buffer + pos, buf_size - pos, "??"));
-  if (hundredths != 0xFF && hundredths <= 99)
-    advance(snprintf(buffer + pos, buf_size - pos, ".%02u", hundredths));
+  // Seconds are the minimal resolution we report — hundredths are not useful.
+  // if (hundredths != 0xFF && hundredths <= 99)
+  //   advance(snprintf(buffer + pos, buf_size - pos, ".%02u", hundredths));
+  (void) hundredths;
   if (deviation != static_cast<int16_t>(0x8000)) {
     const int abs_dev = deviation >= 0 ? deviation : -deviation;
     advance(snprintf(buffer + pos, buf_size - pos, " %c%02d:%02d",

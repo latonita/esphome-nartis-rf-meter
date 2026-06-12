@@ -418,6 +418,10 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   std::array<uint8_t, MAX_RF_FRAME_SIZE> rx_buf_{};
 
   uint8_t rx_accum_buf_[MAX_RF_FRAME_SIZE]{};
+  uint8_t rx_payload_buf_[MAX_DLMS_APDU_SIZE]{};
+  uint8_t rx_dlms_buf_[MAX_DLMS_APDU_SIZE]{};
+  DlmsValue rx_values_[DlmsClient::MAX_LIST_ATTRS]{};
+  uint16_t rx_class_ids_[DlmsClient::MAX_LIST_ATTRS]{};
   size_t rx_accum_len_{0};
   size_t rx_expected_len_{0};
   bool rx_active_{false};
