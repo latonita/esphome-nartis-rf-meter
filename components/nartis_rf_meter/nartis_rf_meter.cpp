@@ -873,7 +873,7 @@ float NartisRfMeterComponent::active_rx_freq_mhz_() const {
   static constexpr float RX_FREQ_DEFAULT[NUM_CHANNELS] = {434.10f, 433.58f, 434.54f, 434.98f};
   static constexpr float RX_FREQ_ALTERNATIVE[NUM_CHANNELS]   = {433.82f, 433.30f, 434.26f, 434.70f};  // meter reply freqs = std TX-halves
   const uint8_t ch = (active_channel_ < NUM_CHANNELS) ? active_channel_ : 0;
-  return use_non_standard_channels_ ? RX_FREQ_ALTERNATIVE[ch] : RX_FREQ_DEFAULT[ch];
+  return use_alternative_channels_ ? RX_FREQ_ALTERNATIVE[ch] : RX_FREQ_DEFAULT[ch];
 }
 
 /*

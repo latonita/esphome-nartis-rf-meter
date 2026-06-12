@@ -343,7 +343,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
         values[stored].valid = false;
       } else {
         pos += n;
-        ESP_LOGD(TAG, "  [%d] type=0x%02X parsed (%d B)", i, type_byte, n);
+        ESP_LOGV(TAG, "  [%d] type=0x%02X parsed (%d B)", i, type_byte, n);
       }
       stored++;
     } else {
@@ -353,7 +353,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
         ESP_LOGW(TAG, "  [%d] skip failed (type=0x%02X)", i, type_byte);
         break;
       }
-      ESP_LOGD(TAG, "  [%d] type=0x%02X skipped (%d B)", i, type_byte, s);
+      ESP_LOGV(TAG, "  [%d] type=0x%02X skipped (%d B)", i, type_byte, s);
       pos += s;
       if (stored < max_results) {
         values[stored].valid = false;
@@ -497,7 +497,7 @@ void DlmsClient::data_to_string(DlmsDataType value_type, const uint8_t *data, si
     case DlmsDataType::UTF8_STRING: {
       // Copy the raw bytes as ASCII. The meter stores textual registers
       // (serials, etc.) as octet-strings whose bytes ARE the ASCII codes —
-      // e.g. 30 32 33 32 33 30 30 33 31 37 33 31 => "023230031731". Trailing
+      // e.g. 30 32 33 32 33 30 30 31 31 31 31 31 => "023230011111". Trailing
       // NUL padding is trimmed; any non-printable byte (incl. an interior NUL)
       // becomes '.', so a zero byte never truncates the string mid-way.
       size_t eff = len;

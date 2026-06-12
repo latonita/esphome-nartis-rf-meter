@@ -378,9 +378,9 @@ static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
     {0x42, 0xF6, 0xB9, 0x1E, 0x42, 0xE0, 0x07, 0x1E},  // CH3: RX 434.98 / TX 434.70 MHz
 };
 
-/* Non-standard ("invented") frequency presets.
+/* Alternative frequency presets.
  *
- * Opt-in via YAML `use_non_standard_channels: true`. This is the MEASURED
+ * Opt-in via YAML `use_alternative_channels: true`. This is the MEASURED
  * meter reply-frequency table, NOT a guess. The advertised channel index in
  * frame[12] bits 7:6 COMMANDS the meter's reply frequency — the meter answers
  * on a per-channel frequency and the CIU listens there (TX always stays on

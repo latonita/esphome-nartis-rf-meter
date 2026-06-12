@@ -18,7 +18,7 @@ CONF_METER_SERIAL = "meter_serial"
 CONF_CIU_SERIAL = "ciu_serial"
 CONF_CIU_ADDRESS = "ciu_address"
 CONF_FIX_CHANNEL = "fix_channel"
-CONF_USE_NON_STANDARD_CHANNELS = "use_non_standard_channels"
+CONF_USE_ALTERNATIVE_CHANNELS = "use_alternative_channels"
 CONF_BATCH_SIZE = "batch_size"
 CONF_RX_TIMEOUT = "rx_timeout"
 CONF_RX_REPLY_TIMEOUT = "rx_reply_timeout"
@@ -65,12 +65,12 @@ CONFIG_SCHEMA = cv.Schema(
 
             cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=0, max=3),
 
-            # Use the non-standard ("invented") frequency presets placed on the
+            # Use the alternative frequency presets placed on the
             # meter's observed reply frequencies (RX 434.30/433.70/434.00/434.55,
             # TX held at 433.82) instead of the default channel grid. The default
             # RX presets are 97..278 kHz off where this meter actually replies and
             # miss it; these centres + 100 kHz BW + AFC capture it. Default: off.
-            cv.Optional(CONF_USE_NON_STANDARD_CHANNELS, default=False): cv.boolean,
+            cv.Optional(CONF_USE_ALTERNATIVE_CHANNELS, default=False): cv.boolean,
             # CIU serial — for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
@@ -121,7 +121,7 @@ async def to_code(config):
     if CONF_FIX_CHANNEL in config:
         cg.add(var.set_fix_channel(config[CONF_FIX_CHANNEL]))
 
-    cg.add(var.set_use_non_standard_channels(config[CONF_USE_NON_STANDARD_CHANNELS]))
+    cg.add(var.set_use_alternative_channels(config[CONF_USE_ALTERNATIVE_CHANNELS]))
 
     cg.add(var.set_batch_size(config[CONF_BATCH_SIZE]))
     cg.add(var.set_rx_timeout_ms(config[CONF_RX_TIMEOUT]))

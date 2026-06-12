@@ -74,7 +74,7 @@ nartis_rf_meter:
   meter_serial: "012345678901"
 
   # Use of alternative RF channels in some cases solves a problem of no reply from the meter
-  #use_non_standard_channels: true
+  #use_alternative_channels: true
 
   # How often to poll the meter (default 5m)
   update_interval: 5m

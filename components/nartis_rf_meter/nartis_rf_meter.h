@@ -83,13 +83,13 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// to match the meter when auto-select tunes to the wrong frequency.
   void set_fix_channel(uint8_t ch) { fix_channel_ = static_cast<int8_t>(ch & 0x3); }
 
-  /// Use the non-standard ("invented") frequency presets (NARTIS_CUSTOM_CHANNELS)
-  /// instead of the default channel grid. The custom centres sit on the meter's
+  /// Use the alternative frequency presets (NARTIS_CUSTOM_CHANNELS) instead of
+  /// the default channel grid. The custom centres sit on the meter's
   /// actually-observed reply frequencies so a 100 kHz + AFC RX can capture them;
   /// the default presets are 97..278 kHz off and miss. Default: default presets.
   /// Enabling this also enables RX channel-hop acquisition (see channel_hopping_enabled_).
-  void set_use_non_standard_channels(bool enable) {
-    use_non_standard_channels_ = enable;
+  void set_use_alternative_channels(bool enable) {
+    use_alternative_channels_ = enable;
     hal_.set_use_custom_channels(enable);
   }
 
@@ -376,7 +376,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // single cycle (counters are saved at end-of-cycle and on abort).
   static constexpr uint32_t FRAME_COUNTER_MARGIN_ = 256;
 
-  bool use_non_standard_channels_{false};  // mirrors HAL flag; gates channel hopping
+  bool use_alternative_channels_{false};  // mirrors HAL flag; gates channel hopping
   uint8_t active_channel_{2};   // advertised+RX channel index; default ch2 = 434.26 MHz reply
   bool channel_locked_{false};  // true once the meter has replied on active_channel_
   uint8_t channel_hop_count_{0};
