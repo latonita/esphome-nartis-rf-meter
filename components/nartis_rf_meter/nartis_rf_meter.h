@@ -140,21 +140,21 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     PAIR_ACK_WAIT_RESPONSE,
     PAIR_MODE6_TX,
     PAIR_MODE6_WAIT_TX_DONE,
-    PAIR_WAIT_KEEPALIVE,
-    // Initial post-pairing beacon (wake up meter)
-    BEACON_TX,
-    BEACON_WAIT_TX_DONE,
-    BEACON_WAIT_RESPONSE,
-    // Data-read cycle (6 frames: GET → keepalive → BEACON → data → BEACON → ack).
-    GET_TX,                       // TX 0x44 encrypted get-request (IEC+DLMS payload)
-    GET_WAIT_TX_DONE,
-    GET_WAIT_KEEPALIVE,           // expect RX 0x5B = "meter received request, hang on"
-    GET_REQ_BEACON_TX,            // TX 0x08 BEACON to fetch the data
-    GET_REQ_BEACON_WAIT_TX_DONE,
-    GET_WAIT_DATA,                // expect RX 0x43 with the actual data response
-    GET_FIN_BEACON_TX,            // TX 0x08 BEACON to acknowledge data
-    GET_FIN_BEACON_WAIT_TX_DONE,
-    GET_WAIT_FINAL_ACK,           // expect RX 0x40 short ack — cycle complete
+    PAIR_WAIT_READY,              // expect RX 0x5B/0x40 = meter ready
+    // Wake beacon — opens the session before reading.
+    WAKE_BEACON_TX,
+    WAKE_BEACON_WAIT_TX_DONE,
+    WAKE_WAIT_ACK,                // expect RX 0x40 short ack
+    // Data-read cycle: REQUEST → POLL → CLOSE, each TX / WAIT_TX_DONE / WAIT_<reply>.
+    READ_REQUEST_TX,              // TX 0x44 encrypted get-request (IEC+DLMS payload)
+    READ_REQUEST_WAIT_TX_DONE,
+    READ_WAIT_REQUEST_ACK,        // expect RX 0x5B = "got request, preparing data" (may jump to 0x43)
+    READ_POLL_BEACON_TX,          // TX 0x08 beacon to fetch the prepared data
+    READ_POLL_BEACON_WAIT_TX_DONE,
+    READ_WAIT_DATA,               // expect RX 0x43 with the actual data response
+    READ_CLOSE_BEACON_TX,         // TX 0x08 beacon to acknowledge/close
+    READ_CLOSE_BEACON_WAIT_TX_DONE,
+    READ_WAIT_CLOSE_ACK,          // expect RX 0x40 short ack — cycle complete
     // Publish results
     PUBLISH,
     // Error recovery
@@ -321,8 +321,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // registers internally. Sending the BEACON earlier than that makes the
   // meter respond with 0x40 (cycle-close ack, no data) instead of 0x43
   // (data response). Use ~5000 ms to comfortably cover the meter's gap.
-  static constexpr uint32_t GET_REQ_BEACON_DELAY_MS_     = 5000;
-  static constexpr uint32_t GET_FIN_BEACON_DELAY_MS_     = 4500;
+  static constexpr uint32_t READ_POLL_BEACON_DELAY_MS_     = 5000;
+  static constexpr uint32_t READ_CLOSE_BEACON_DELAY_MS_     = 4500;
 
   // FAST PRIMING (experiment). The priming read is a throwaway engagement GET —
   // its 0x43 data is discarded, so it does NOT need the ~5 s pacing that exists
@@ -331,8 +331,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // short delay + few retries cuts priming from ~15 s (3×5 s) to a few seconds.
   // These apply ONLY while !session_primed_; real batches keep the full pacing.
   // Tune up if the first real batch starts coming back sacrificial (0x40 no-data).
-  static constexpr uint32_t PRIMING_REQ_BEACON_DELAY_MS_ = 1000;
-  static constexpr uint8_t  PRIMING_MAX_REQ_RETRIES_     = 2;
+  static constexpr uint32_t PRIMING_POLL_BEACON_DELAY_MS_ = 1000;
+  static constexpr uint8_t  PRIMING_MAX_POLL_RETRIES_     = 2;
 
   State state_{State::NOT_INITIALIZED};
   uint32_t state_entered_ms_{0};

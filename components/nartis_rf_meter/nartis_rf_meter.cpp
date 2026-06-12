@@ -326,19 +326,19 @@ static const LogString *state_to_str(NartisRfMeterComponent::State s) {
     case NartisRfMeterComponent::State::PAIR_ACK_WAIT_RESPONSE: return LOG_STR("PAIR_ACK_WAIT_RESPONSE");
     case NartisRfMeterComponent::State::PAIR_MODE6_TX: return LOG_STR("PAIR_MODE6_TX");
     case NartisRfMeterComponent::State::PAIR_MODE6_WAIT_TX_DONE: return LOG_STR("PAIR_MODE6_WAIT_TX_DONE");
-    case NartisRfMeterComponent::State::PAIR_WAIT_KEEPALIVE: return LOG_STR("PAIR_WAIT_KEEPALIVE");
-    case NartisRfMeterComponent::State::BEACON_TX: return LOG_STR("BEACON_TX");
-    case NartisRfMeterComponent::State::BEACON_WAIT_TX_DONE: return LOG_STR("BEACON_WAIT_TX_DONE");
-    case NartisRfMeterComponent::State::BEACON_WAIT_RESPONSE: return LOG_STR("BEACON_WAIT_RESPONSE");
-    case NartisRfMeterComponent::State::GET_TX: return LOG_STR("GET_TX");
-    case NartisRfMeterComponent::State::GET_WAIT_TX_DONE: return LOG_STR("GET_WAIT_TX_DONE");
-    case NartisRfMeterComponent::State::GET_WAIT_KEEPALIVE: return LOG_STR("GET_WAIT_KEEPALIVE");
-    case NartisRfMeterComponent::State::GET_REQ_BEACON_TX: return LOG_STR("GET_REQ_BEACON_TX");
-    case NartisRfMeterComponent::State::GET_REQ_BEACON_WAIT_TX_DONE: return LOG_STR("GET_REQ_BEACON_WAIT_TX_DONE");
-    case NartisRfMeterComponent::State::GET_WAIT_DATA: return LOG_STR("GET_WAIT_DATA");
-    case NartisRfMeterComponent::State::GET_FIN_BEACON_TX: return LOG_STR("GET_FIN_BEACON_TX");
-    case NartisRfMeterComponent::State::GET_FIN_BEACON_WAIT_TX_DONE: return LOG_STR("GET_FIN_BEACON_WAIT_TX_DONE");
-    case NartisRfMeterComponent::State::GET_WAIT_FINAL_ACK: return LOG_STR("GET_WAIT_FINAL_ACK");
+    case NartisRfMeterComponent::State::PAIR_WAIT_READY: return LOG_STR("PAIR_WAIT_READY");
+    case NartisRfMeterComponent::State::WAKE_BEACON_TX: return LOG_STR("WAKE_BEACON_TX");
+    case NartisRfMeterComponent::State::WAKE_BEACON_WAIT_TX_DONE: return LOG_STR("WAKE_BEACON_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::WAKE_WAIT_ACK: return LOG_STR("WAKE_WAIT_ACK");
+    case NartisRfMeterComponent::State::READ_REQUEST_TX: return LOG_STR("READ_REQUEST_TX");
+    case NartisRfMeterComponent::State::READ_REQUEST_WAIT_TX_DONE: return LOG_STR("READ_REQUEST_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::READ_WAIT_REQUEST_ACK: return LOG_STR("READ_WAIT_REQUEST_ACK");
+    case NartisRfMeterComponent::State::READ_POLL_BEACON_TX: return LOG_STR("READ_POLL_BEACON_TX");
+    case NartisRfMeterComponent::State::READ_POLL_BEACON_WAIT_TX_DONE: return LOG_STR("READ_POLL_BEACON_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::READ_WAIT_DATA: return LOG_STR("READ_WAIT_DATA");
+    case NartisRfMeterComponent::State::READ_CLOSE_BEACON_TX: return LOG_STR("READ_CLOSE_BEACON_TX");
+    case NartisRfMeterComponent::State::READ_CLOSE_BEACON_WAIT_TX_DONE: return LOG_STR("READ_CLOSE_BEACON_WAIT_TX_DONE");
+    case NartisRfMeterComponent::State::READ_WAIT_CLOSE_ACK: return LOG_STR("READ_WAIT_CLOSE_ACK");
     case NartisRfMeterComponent::State::PUBLISH: return LOG_STR("PUBLISH");
     case NartisRfMeterComponent::State::ERROR_RECOVERY: return LOG_STR("ERROR_RECOVERY");
     default: return LOG_STR("UNKNOWN");
@@ -497,7 +497,7 @@ void NartisRfMeterComponent::handle_state_() {
           ESP_LOGI(TAG, "Pairing: meter ready (0x%02X) — paired", t);
           paired_ = true;
           rx_parse_retries_ = 0;
-          set_state_(State::BEACON_TX);
+          set_state_(State::WAKE_BEACON_TX);
         } else if (try_rearm_rx_("Pairing ACK-wait", t, n)) {
           // Noise frame — re-armed to listen once more within the same window.
         } else {
@@ -518,10 +518,10 @@ void NartisRfMeterComponent::handle_state_() {
       break;
 
     case State::PAIR_MODE6_WAIT_TX_DONE:
-      handle_wait_tx_done_(State::PAIR_WAIT_KEEPALIVE);
+      handle_wait_tx_done_(State::PAIR_WAIT_READY);
       break;
 
-    case State::PAIR_WAIT_KEEPALIVE: {
+    case State::PAIR_WAIT_READY: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         uint8_t *const payload = rx_payload_buf_;
@@ -535,14 +535,14 @@ void NartisRfMeterComponent::handle_state_() {
           ESP_LOGI(TAG, "Pairing complete (meter replied 0x%02X). Now paired.", t);
           paired_ = true;
           rx_parse_retries_ = 0;
-          set_state_(State::BEACON_TX);
+          set_state_(State::WAKE_BEACON_TX);
         } else if (try_rearm_rx_("Pairing keepalive", t, n)) {
           // Noise frame — re-armed to listen once more within the same window.
         } else {
           ESP_LOGW(TAG, "Pairing: gave up keepalive wait (type=0x%02X) — proceeding anyway", t);
           paired_ = true;
           rx_parse_retries_ = 0;
-          set_state_(State::BEACON_TX);
+          set_state_(State::WAKE_BEACON_TX);
         }
       } else if (status == RxStatus::ERROR) {
         // Keepalive is the meter's "I'm ready" nudge; if we miss it, still
@@ -550,20 +550,20 @@ void NartisRfMeterComponent::handle_state_() {
         ESP_LOGW(TAG, "Pairing: no keepalive — proceeding to beacon anyway");
         paired_ = true;
         rx_parse_retries_ = 0;
-        set_state_(State::BEACON_TX);
+        set_state_(State::WAKE_BEACON_TX);
       }
       break;
     }
 
-    case State::BEACON_TX:
+    case State::WAKE_BEACON_TX:
       handle_beacon_tx_();
       break;
 
-    case State::BEACON_WAIT_TX_DONE:
-      handle_wait_tx_done_(State::BEACON_WAIT_RESPONSE);
+    case State::WAKE_BEACON_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::WAKE_WAIT_ACK);
       break;
 
-    case State::BEACON_WAIT_RESPONSE: {
+    case State::WAKE_WAIT_ACK: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         ESP_LOGI(TAG, "Beacon response received (%d bytes)", (int) rx_accum_len_);
@@ -588,7 +588,7 @@ void NartisRfMeterComponent::handle_state_() {
             }
           }
           rx_parse_retries_ = 0;
-          set_state_(State::GET_TX);
+          set_state_(State::READ_REQUEST_TX);
         } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_) {
           rx_parse_retries_++;
           if (payload_len >= 0) {
@@ -600,7 +600,7 @@ void NartisRfMeterComponent::handle_state_() {
             ESP_LOGW(TAG, "Beacon response: unexpected frame (type=0x%02X, n=%d) — "
                           "re-sending beacon (try %u/%u)",
                      t, payload_len, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-            set_state_(State::BEACON_TX);
+            set_state_(State::WAKE_BEACON_TX);
           } else if (esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
             // Parse failed (CRC/noise) and the RX window still has time: the
             // meter's real reply may still be arriving — keep listening.
@@ -613,7 +613,7 @@ void NartisRfMeterComponent::handle_state_() {
             ESP_LOGW(TAG, "Beacon response: no decodable reply (last type=0x%02X) — "
                           "re-sending beacon (try %u/%u)",
                      t, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-            set_state_(State::BEACON_TX);
+            set_state_(State::WAKE_BEACON_TX);
           }
         } else {
           ESP_LOGW(TAG, "Beacon response: gave up after %u attempts (last type=0x%02X)",
@@ -629,7 +629,7 @@ void NartisRfMeterComponent::handle_state_() {
           rx_parse_retries_++;
           ESP_LOGW(TAG, "Beacon RX error/timeout — re-sending beacon (try %u/%u)",
                    rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
-          set_state_(State::BEACON_TX);
+          set_state_(State::WAKE_BEACON_TX);
         } else {
           ESP_LOGW(TAG, "Beacon RX error/timeout — gave up after %u attempts", rx_parse_retries_);
           rx_parse_retries_ = 0;
@@ -639,24 +639,24 @@ void NartisRfMeterComponent::handle_state_() {
       break;
     }
 
-    case State::GET_TX:
+    case State::READ_REQUEST_TX:
       handle_get_tx_();
       break;
 
-    case State::GET_WAIT_TX_DONE:
-      handle_wait_tx_done_(State::GET_WAIT_KEEPALIVE);
+    case State::READ_REQUEST_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::READ_WAIT_REQUEST_ACK);
       break;
 
     // Step 1: meter must reply with 0x5B keepalive ("I got your request, hang on").
     // Short 25-byte plain frame.
-    case State::GET_WAIT_KEEPALIVE: {
+    case State::READ_WAIT_REQUEST_ACK: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         if (raw_type == 0x5B) {
           ESP_LOGV(TAG, "GET cycle: meter ack'd request (0x5B), requesting data via BEACON");
           retry_count_ = 0;
-          set_state_(State::GET_REQ_BEACON_TX);
+          set_state_(State::READ_POLL_BEACON_TX);
         } else if (raw_type == 0x43) {
           // Meter answered the GET directly with data (no keepalive/beacon round-trip
           // needed) — matches genuine captures.
@@ -665,7 +665,7 @@ void NartisRfMeterComponent::handle_state_() {
           handle_data_response_();
         } else {
           ESP_LOGW(TAG, "GET cycle: unexpected response to get-request (type=0x%02X)", raw_type);
-          set_state_(State::GET_TX);  // retry whole get-request
+          set_state_(State::READ_REQUEST_TX);  // retry whole get-request
         }
       } else if (status == RxStatus::ERROR) {
         ESP_LOGD(TAG, "GET cycle: no reply yet (start=%u, n=%u) — re-sending",
@@ -677,7 +677,7 @@ void NartisRfMeterComponent::handle_state_() {
           retry_count_ = 0;
           advance_after_get_();
         } else {
-          set_state_(State::GET_TX);
+          set_state_(State::READ_REQUEST_TX);
         }
       }
       break;
@@ -689,11 +689,11 @@ void NartisRfMeterComponent::handle_state_() {
     // this time to query its internal OBIS registers and prep the response.
     // Sending the beacon faster than this makes the meter respond with 0x40
     // (cycle-close ack) instead of 0x43 (data response).
-    case State::GET_REQ_BEACON_TX: {
+    case State::READ_POLL_BEACON_TX: {
       // Fast priming: the throwaway priming GET doesn't need the long data-prep
       // pacing — poll quickly just to engage the meter. Real batches keep 5 s.
       const uint32_t req_beacon_delay =
-          session_primed_ ? GET_REQ_BEACON_DELAY_MS_ : PRIMING_REQ_BEACON_DELAY_MS_;
+          session_primed_ ? READ_POLL_BEACON_DELAY_MS_ : PRIMING_POLL_BEACON_DELAY_MS_;
       if (esphome::millis() - state_entered_ms_ < req_beacon_delay) {
         break;
       }
@@ -701,12 +701,12 @@ void NartisRfMeterComponent::handle_state_() {
       break;
     }
 
-    case State::GET_REQ_BEACON_WAIT_TX_DONE:
-      handle_wait_tx_done_(State::GET_WAIT_DATA);
+    case State::READ_POLL_BEACON_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::READ_WAIT_DATA);
       break;
 
     // Step 3: meter sends 0x43 RESPONSE carrying the data (nested-encrypted body).
-    case State::GET_WAIT_DATA: {
+    case State::READ_WAIT_DATA: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
@@ -718,7 +718,7 @@ void NartisRfMeterComponent::handle_state_() {
           retry_count_++;
           // Priming only needs to engage the meter; it gets 0x40 no-data by
           // design, so cap its req-beacon polls low and declare primed early.
-          const uint8_t req_max = session_primed_ ? MAX_RETRIES_ : PRIMING_MAX_REQ_RETRIES_;
+          const uint8_t req_max = session_primed_ ? MAX_RETRIES_ : PRIMING_MAX_POLL_RETRIES_;
           if (retry_count_ >= req_max) {
             if (session_primed_) {
               ESP_LOGW(TAG, "GET cycle: max retries on data response — skipping batch (start=%u)",
@@ -731,7 +731,7 @@ void NartisRfMeterComponent::handle_state_() {
             retry_count_ = 0;
             advance_after_get_();
           } else {
-            set_state_(State::GET_REQ_BEACON_TX);
+            set_state_(State::READ_POLL_BEACON_TX);
           }
         }
       } else if (status == RxStatus::ERROR) {
@@ -742,7 +742,7 @@ void NartisRfMeterComponent::handle_state_() {
           retry_count_ = 0;
           advance_after_get_();
         } else {
-          set_state_(State::GET_REQ_BEACON_TX);
+          set_state_(State::READ_POLL_BEACON_TX);
         }
       }
       break;
@@ -752,19 +752,19 @@ void NartisRfMeterComponent::handle_state_() {
     // Pace by ~4500 ms after RX of 0x43 — the meter waits
     // ~4200 ms here. Likely protocol pacing for the meter to settle its
     // state-machine before the cycle-close beacon arrives.
-    case State::GET_FIN_BEACON_TX:
-      if (esphome::millis() - state_entered_ms_ < GET_FIN_BEACON_DELAY_MS_) {
+    case State::READ_CLOSE_BEACON_TX:
+      if (esphome::millis() - state_entered_ms_ < READ_CLOSE_BEACON_DELAY_MS_) {
         break;
       }
       handle_beacon_tx_();
       break;
 
-    case State::GET_FIN_BEACON_WAIT_TX_DONE:
-      handle_wait_tx_done_(State::GET_WAIT_FINAL_ACK);
+    case State::READ_CLOSE_BEACON_WAIT_TX_DONE:
+      handle_wait_tx_done_(State::READ_WAIT_CLOSE_ACK);
       break;
 
     // Step 5: meter replies with 0x40 short ack — cycle complete.
-    case State::GET_WAIT_FINAL_ACK: {
+    case State::READ_WAIT_CLOSE_ACK: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
@@ -859,7 +859,7 @@ void NartisRfMeterComponent::handle_channel_select_() {
   // First contact requires the pairing handshake; once paired this boot we
   // go straight to the beacon/poll cycle.
   if (paired_) {
-    set_state_(State::BEACON_TX);
+    set_state_(State::WAKE_BEACON_TX);
   } else {
     pair_retry_ = 0;
     set_state_(State::PAIR_PROBE_TX);
@@ -1065,19 +1065,19 @@ void NartisRfMeterComponent::handle_beacon_tx_() {
   }
 
   // Pick the right "wait TX done" state based on which beacon we're sending:
-  //   BEACON_TX            — initial post-pairing wake-up beacon (→ wait 0x40)
-  //   GET_REQ_BEACON_TX    — in-cycle beacon requesting data (→ wait 0x43)
-  //   GET_FIN_BEACON_TX    — in-cycle beacon closing the read (→ wait 0x40)
+  //   WAKE_BEACON_TX        — session wake-up beacon (→ wait 0x40)
+  //   READ_POLL_BEACON_TX   — in-cycle beacon fetching data (→ wait 0x43)
+  //   READ_CLOSE_BEACON_TX  — in-cycle beacon closing the read (→ wait 0x40)
   switch (state_) {
-    case State::GET_REQ_BEACON_TX:
-      set_state_(State::GET_REQ_BEACON_WAIT_TX_DONE);
+    case State::READ_POLL_BEACON_TX:
+      set_state_(State::READ_POLL_BEACON_WAIT_TX_DONE);
       break;
-    case State::GET_FIN_BEACON_TX:
-      set_state_(State::GET_FIN_BEACON_WAIT_TX_DONE);
+    case State::READ_CLOSE_BEACON_TX:
+      set_state_(State::READ_CLOSE_BEACON_WAIT_TX_DONE);
       break;
-    case State::BEACON_TX:
+    case State::WAKE_BEACON_TX:
     default:
-      set_state_(State::BEACON_WAIT_TX_DONE);
+      set_state_(State::WAKE_BEACON_WAIT_TX_DONE);
       break;
   }
 }
@@ -1164,7 +1164,7 @@ void NartisRfMeterComponent::handle_get_tx_() {
     return;
   }
 
-  set_state_(State::GET_WAIT_TX_DONE);
+  set_state_(State::READ_REQUEST_WAIT_TX_DONE);
 }
 
 bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len) {
@@ -1207,8 +1207,8 @@ bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len)
 }
 
 void NartisRfMeterComponent::handle_data_response_() {
-  // Shared 0x43 data-response handling for both GET_WAIT_KEEPALIVE (meter
-  // answered the GET directly) and GET_WAIT_DATA. Parse the response; on
+  // Shared 0x43 data-response handling for both READ_WAIT_REQUEST_ACK (meter
+  // answered the GET directly) and READ_WAIT_DATA. Parse the response; on
   // success advance to the closing beacon — or straight to the next batch when
   // skip_fin_beacons_ is set. On repeated parse failure skip the batch;
   // otherwise re-send the current GET.
@@ -1217,7 +1217,7 @@ void NartisRfMeterComponent::handle_data_response_() {
     if (skip_fin_beacons_) {
       advance_after_get_();  // experiment: straight to next batch, no closing beacon
     } else {
-      set_state_(State::GET_FIN_BEACON_TX);  // closing beacon
+      set_state_(State::READ_CLOSE_BEACON_TX);  // closing beacon
     }
   } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
     ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
@@ -1226,12 +1226,12 @@ void NartisRfMeterComponent::handle_data_response_() {
     skip_current_batch_();
     advance_after_get_();
   } else {
-    set_state_(State::GET_TX);  // retry same batch
+    set_state_(State::READ_REQUEST_TX);  // retry same batch
   }
 }
 
 bool NartisRfMeterComponent::handle_get_response_() {
-  // Caller (GET_WAIT_DATA case) owns the state transition AFTER this returns.
+  // Caller (READ_WAIT_DATA case) owns the state transition AFTER this returns.
   // We parse the frame, then walk the multi-result get-response-with-list to
   // pull one DlmsValue per attribute in the batch we just sent. Vendor-init
   // results are parsed-and-discarded; user-batch results are stored into
@@ -1353,13 +1353,13 @@ void NartisRfMeterComponent::advance_after_get_() {
     session_primed_ = true;
     ESP_LOGD(TAG, "Session primed — proceeding to with-list reads");
     save_pairing_state_();
-    set_state_(State::GET_TX);
+    set_state_(State::READ_REQUEST_TX);
     return;
   }
   if (batch_start_idx_ >= sensors_.size()) {
     set_state_(State::PUBLISH);
   } else {
-    set_state_(State::GET_TX);
+    set_state_(State::READ_REQUEST_TX);
   }
 }
 
@@ -1745,8 +1745,8 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
   // the full RX_TIMEOUT_MS_ governs completion so a large frame isn't aborted.
   uint32_t reply_timeout = rx_timeout_ms_;
   if (rx_accum_len_ == 0 &&
-      (state_ == State::GET_WAIT_KEEPALIVE || state_ == State::GET_WAIT_DATA ||
-       state_ == State::GET_WAIT_FINAL_ACK)) {
+      (state_ == State::READ_WAIT_REQUEST_ACK || state_ == State::READ_WAIT_DATA ||
+       state_ == State::READ_WAIT_CLOSE_ACK)) {
     reply_timeout = rx_reply_timeout_ms_;
   }
   if (elapsed > reply_timeout) {
