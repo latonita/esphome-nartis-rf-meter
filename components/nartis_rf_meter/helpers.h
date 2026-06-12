@@ -204,16 +204,6 @@ static constexpr size_t CRC_DUAL_THRESHOLD = 128;  // total size; > this ⇒ dua
 static constexpr size_t CRC1_OFFSET        = 0x7E; // CRC1 position in dual-CRC frames
 
 /* ================================================================
- * Legacy aliases (deprecated — use RF_TX_* / RF_RX_* instead)
- * Kept for transient compile compatibility; will be removed.
- * ================================================================ */
-static constexpr size_t RF_HDR_LENGTH = RF_TX_LENGTH;
-static constexpr size_t RF_HDR_FLAGS  = RF_TX_FLAGS;
-static constexpr size_t RF_HDR_ADDR   = RF_TX_ADDR;
-static constexpr size_t RF_HDR_ADDR_LEN = RF_TX_ADDR_LEN;
-static constexpr size_t RF_HDR_SIZE   = RF_TX_HDR_SIZE;
-
-/* ================================================================
  * Nartis Proprietary Protocol Tags (DLMS-layer)
  * ================================================================ */
 static constexpr uint8_t NARTIS_TAG_READ_REQ = 0xC0;    // Read request

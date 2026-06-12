@@ -19,12 +19,6 @@
 
 namespace esphome::nartis_rf_meter {
 
-/// DLMS client session state
-enum class DlmsState : uint8_t {
-  IDLE,                  // Not connected
-  REQUEST_SENT,          // Read request sent, waiting for response
-};
-
 /// DLMS data types (subset used by Nartis meters)
 enum class DlmsDataType : uint8_t {
   NULL_DATA = 0x00,
@@ -131,12 +125,6 @@ class DlmsClient {
   static void data_to_string(DlmsDataType type, const uint8_t *data, size_t len,
                              char *buffer, size_t buf_size);
 
-  /* ---- State ---- */
-
-  DlmsState get_state() const { return state_; }
-  void set_state(DlmsState state) { state_ = state; }
-  void reset() { state_ = DlmsState::IDLE; }
-
  private:
   /// Parse a DLMS typed value at data[offset]. Returns bytes consumed, or -1 on error.
   /// `class_hint` is the COSEM class-id of the source attribute (0 = unknown);
@@ -144,7 +132,6 @@ class DlmsClient {
   static int parse_typed_value(const uint8_t *data, size_t len, DlmsValue *value_out,
                                uint16_t class_hint = 0);
 
-  DlmsState state_{DlmsState::IDLE};
   uint16_t client_addr_{16};
   uint16_t server_addr_{1};
   char password_[32]{};

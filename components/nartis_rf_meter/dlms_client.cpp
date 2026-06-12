@@ -89,8 +89,6 @@ size_t DlmsClient::build_get_request_with_list(uint8_t *out, size_t max,
     out[pos++] = 0x00;  // access-selector = none
   }
 
-  state_ = DlmsState::REQUEST_SENT;
-
   ESP_LOGD(TAG, "Built get-request-with-list: count=%d (%d bytes)", count, (int) pos);
   for (uint8_t i = 0; i < count; i++) {
     const AttrSpec &a = attrs[i];
@@ -127,7 +125,6 @@ size_t DlmsClient::build_get_request_normal(uint8_t *out, size_t max,
   out[pos++] = attr_id;
   out[pos++] = 0x00;   // access-selector = none
 
-  state_ = DlmsState::REQUEST_SENT;
   ESP_LOGD(TAG, "Built get-request-normal: class=%u OBIS=%u.%u.%u.%u.%u.%u attr=%u (%d bytes)",
            class_id, obis.bytes[0], obis.bytes[1], obis.bytes[2], obis.bytes[3],
            obis.bytes[4], obis.bytes[5], attr_id, (int) pos);
@@ -182,7 +179,6 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
     return false;
   }
 
-  state_ = DlmsState::IDLE;
   return true;
 }
 
@@ -377,7 +373,6 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
   }
 
   if (count_out) *count_out = stored;
-  state_ = DlmsState::IDLE;
   return true;
 }
 
