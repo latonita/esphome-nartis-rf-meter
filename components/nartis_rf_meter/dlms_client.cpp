@@ -2,7 +2,6 @@
  * Nartis DLMS Client — Implementation
  *
  * Lightweight DLMS/COSEM APDU builder and parser.
- * Based on reverse-engineered CIU firmware protocol.
  */
 
 #include "dlms_client.h"
@@ -31,10 +30,6 @@ static inline uint64_t be64(const uint8_t *p) {
   return v;
 }
 
-/* ================================================================
- * Configuration
- * ================================================================ */
-
 void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uint16_t server_addr) {
   strncpy(password_, password, sizeof(password_) - 1);
   password_[sizeof(password_) - 1] = '\0';
@@ -43,24 +38,23 @@ void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uin
 }
 
 /* ================================================================
- * Read Request Builder — DLMS get-request-with-list (matches firmware)
+ * Read Request Builder — DLMS get-request-with-list
  *
- * spi2 frame #0 (real-CIU first post-pairing GET) shows the firmware uses
- * the standard DLMS `get-request-with-list` form, NOT `get-request-normal`,
- * even when only one attribute is interesting. Meter responds with
- * `get-response-with-list`. The single-OBIS form (`c0 01`) gets `0x40`
- * (no-data short-ack) instead of `0x43`.
+ * The meter uses the standard DLMS `get-request-with-list` form, NOT
+ * `get-request-normal`, even when only one attribute is interesting. Meter
+ * responds with `get-response-with-list`. The single-OBIS form (`c0 01`) gets
+ * `0x40` (no-data short-ack) instead of `0x43`.
  *
- * Format (verified against decrypted spi2 frame #0 payload):
+ * Format:
  *
  *   c0 03                          ← tag + type (get-request-with-list)
  *   c1                             ← invoke-id-priority
- *   N                              ← attribute-list count (1..10 in captures)
+ *   N                              ← attribute-list count (1..10)
  *   [N × 10-byte attribute spec]:
  *     2 B    class-id (BE u16)     ← e.g. 00 01 = 1 (Data class)
  *     6 B    OBIS code             ← e.g. 00 00 60 80 03 FF
  *     1 B    attr-id               ← e.g. 02 (value)
- *     1 B    access-selector       ← 0x00 (none) in all firmware captures
+ *     1 B    access-selector       ← 0x00 (none)
  *
  * The legacy single-OBIS form is kept as `build_read_request_normal` for
  * reference but not used in the GET path.
@@ -102,7 +96,6 @@ size_t DlmsClient::build_get_request_with_list(uint8_t *out, size_t max,
 size_t DlmsClient::build_read_request(uint8_t *out, size_t max,
                                       const ObisCode &obis, uint16_t class_id,
                                       uint8_t attr_id) {
-  // Single-attribute wrapper around the list builder.
   AttrSpec a{class_id, obis, attr_id};
   return build_get_request_with_list(out, max, &a, 1);
 }
@@ -134,14 +127,13 @@ size_t DlmsClient::build_get_request_normal(uint8_t *out, size_t max,
 /* ================================================================
  * Read Response Parser — Proprietary Nartis Protocol
  *
- * Firmware response format (parsed by nartis_parse_read_response + nartis_process_read_data):
- *   [0-2]  = 3-byte envelope header (stripped by nartis_parse_read_response)
+ * The meter's response format is:
+ *   [0-2]  = 3-byte envelope header (stripped)
  *   [3]    = status byte (0x00 = success)
  *   [4]    = attribute ID echo
  *   [5+]   = DLMS typed data (standard type tag + value)
  *
- * The typed data at [5+] uses standard DLMS data type encoding
- * (parsed by firmware dlms_parse_typed_value (0x9634)).
+ * The typed data at [5+] uses standard DLMS data type encoding.
  * ================================================================ */
 
 bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue *value_out) {
@@ -150,12 +142,11 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
     return false;
   }
 
-  // Log first bytes for debugging
   ESP_LOGD(TAG, "Response (%d bytes): %02X %02X %02X %02X %02X %02X ...",
            (int) len, data[0], data[1], data[2],
            len > 3 ? data[3] : 0, len > 4 ? data[4] : 0, len > 5 ? data[5] : 0);
 
-  // Skip 3-byte envelope header (firmware nartis_parse_read_response strips these)
+  // Skip 3-byte envelope header
   size_t offset = 3;
 
   // Check status byte — must be 0x00 for success
@@ -163,11 +154,10 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
     ESP_LOGW(TAG, "Read response error: status=0x%02X", data[offset]);
     return false;
   }
-  offset++;  // skip status
+  offset++;
 
-  offset++;  // skip attribute ID echo
+  offset++;
 
-  // Parse DLMS typed value
   if (offset >= len) {
     ESP_LOGW(TAG, "No data after response header");
     return false;
@@ -185,7 +175,7 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
 /* ================================================================
  * Multi-result response parser — get-response-with-list
  *
- * Decrypted payload layout observed in dump-spi2 frame #3:
+ * Decrypted payload layout:
  *
  *   0d fd f8 <2B tag/id>           ← Nartis prefix (5 bytes, optional)
  *   00 01 00 01 00 66 00 <len>     ← IEC 62056-47 wrapper (8 bytes)
@@ -294,7 +284,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
   }
   // Our user reads are always get-request-with-list, and the meter always
   // answers them with get-response-with-list (0xC4 0x03) — even a 1-attr batch
-  // (verified: a single-OBIS request still returns `C4 03 C1 01 …`). The ONLY
+  // (a single-OBIS request still returns `C4 03 C1 01 …`). The ONLY
   // thing that emits get-response-normal (0xC4 0x01) is the priming
   // get-request-normal. The meter sometimes BUFFERS that priming answer and
   // delivers it LATE, landing as the first 0x43 of the user-read phase. If we
@@ -404,7 +394,6 @@ static void format_cosem_datetime(const uint8_t *data, size_t len,
     if (n > 0 && pos + static_cast<size_t>(n) < buf_size) pos += static_cast<size_t>(n);
   };
 
-  // Date: YYYY-MM-DD
   if (year != 0x0000 && year != 0xFFFF)
     advance(snprintf(buffer + pos, buf_size - pos, "%04u", year));
   else
@@ -419,7 +408,6 @@ static void format_cosem_datetime(const uint8_t *data, size_t len,
     advance(snprintf(buffer + pos, buf_size - pos, "%02u", day));
   else
     advance(snprintf(buffer + pos, buf_size - pos, "??"));
-  // Time: HH:MM:SS
   advance(snprintf(buffer + pos, buf_size - pos, " "));
   if (hour != 0xFF && hour <= 23)
     advance(snprintf(buffer + pos, buf_size - pos, "%02u", hour));
@@ -435,20 +423,14 @@ static void format_cosem_datetime(const uint8_t *data, size_t len,
     advance(snprintf(buffer + pos, buf_size - pos, "%02u", second));
   else
     advance(snprintf(buffer + pos, buf_size - pos, "??"));
-  // Hundredths
   if (hundredths != 0xFF && hundredths <= 99)
     advance(snprintf(buffer + pos, buf_size - pos, ".%02u", hundredths));
-  // Timezone deviation
   if (deviation != static_cast<int16_t>(0x8000)) {
     const int abs_dev = deviation >= 0 ? deviation : -deviation;
     advance(snprintf(buffer + pos, buf_size - pos, " %c%02d:%02d",
                      deviation >= 0 ? '+' : '-', abs_dev / 60, abs_dev % 60));
   }
 }
-
-/* ================================================================
- * Value Converters — shared by every sensor (numeric + text)
- * ================================================================ */
 
 float DlmsClient::data_as_float(DlmsDataType value_type, const uint8_t *data, size_t len) {
   if (len == 0 || data == nullptr) return 0.0f;

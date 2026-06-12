@@ -14,16 +14,7 @@ namespace esphome::nartis_rf_meter {
 
 static const char *const TAG = "cmt2300a_hal";
 
-/* ================================================================
- * Destructor — no resources to clean up (polling-based RX, no ISR/queue)
- * ================================================================ */
-
 Cmt2300aHal::~Cmt2300aHal() = default;
-
-/* ================================================================
- * Pin helpers — ESPHome ISRInternalGPIOPin (fast, non-virtual, portable)
- * pin_high/pin_low/pin_read are inline static in the header.
- * ================================================================ */
 
 void Cmt2300aHal::sdio_set_output() { sdio_.pin_mode(gpio::FLAG_OUTPUT); }
 void Cmt2300aHal::sdio_set_input()  { sdio_.pin_mode(gpio::FLAG_INPUT); }
@@ -33,16 +24,13 @@ void Cmt2300aHal::spi_delay() {
   esphome::delayMicroseconds(1);
 }
 
-/* ================================================================
- * Bit-bang SPI primitives
- *
- * CMT2300A SPI protocol:
+/* CMT2300A SPI protocol:
  *   - SDIO is bidirectional (half-duplex)
  *   - Data clocked on RISING edge of SCLK
  *   - MSB first
  *   - Address byte: bit7 = R/W (1=read, 0=write), bits[6:0] = address
  *   - CSB for register access, FCSB for FIFO access
- * ================================================================ */
+ */
 
 void Cmt2300aHal::spi_send_byte(uint8_t byte) {
   for (int i = 7; i >= 0; i--) {
@@ -133,10 +121,6 @@ void Cmt2300aHal::spi_read_fifo(uint8_t *data, size_t len) {
   }
 }
 
-/* ================================================================
- * Public register access
- * ================================================================ */
-
 void Cmt2300aHal::write_reg(uint8_t addr, uint8_t val) {
   spi_write_reg(addr, val);
 }
@@ -157,10 +141,6 @@ void Cmt2300aHal::update_reg(uint8_t addr, uint8_t mask, uint8_t val) {
   spi_write_reg(addr, reg);
 }
 
-/* ================================================================
- * Pin configuration
- * ================================================================ */
-
 void Cmt2300aHal::set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIOPin *sclk,
                            esphome::InternalGPIOPin *csb, esphome::InternalGPIOPin *fcsb,
                            esphome::InternalGPIOPin *gpio3) {
@@ -177,10 +157,6 @@ void Cmt2300aHal::set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIO
   fcsb_ = fcsb->to_isr();
   gpio3_ = gpio3->to_isr();
 }
-
-/* ================================================================
- * Initialization
- * ================================================================ */
 
 bool Cmt2300aHal::init() {
   ESP_LOGI(TAG, "Initializing CMT2300A...");
@@ -206,17 +182,14 @@ bool Cmt2300aHal::init() {
   // Soft reset
   spi_write_reg(REG_SOFT_RST, SOFT_RST_VALUE);
 
-  // Wait for chip to stabilize
   esphome::delay(RESET_DELAY_MS);
 
-  // Enter standby
   spi_write_reg(REG_MODE_CTL, GO_STBY);
   if (!wait_for_state(STA_STBY, 20)) {
     ESP_LOGE(TAG, "Failed to enter standby after reset");
     return false;
   }
 
-  // Verify chip is responding
   if (!is_chip_connected()) {
     ESP_LOGE(TAG, "CMT2300A not detected — check wiring");
     return false;
@@ -225,7 +198,7 @@ bool Cmt2300aHal::init() {
   // Enable config retention (preserve config across state transitions)
   update_reg(REG_MODE_STA, MASK_CFG_RETAIN, MASK_CFG_RETAIN);
 
-  // Enable LFOSC_RECAL (firmware: REG_EN_CTL |= 0x20)
+  // Enable LFOSC_RECAL (REG_EN_CTL |= 0x20)
   update_reg(REG_EN_CTL, 0x20, 0x20);
 
   // Write all 96 bytes of register configuration
@@ -234,10 +207,8 @@ bool Cmt2300aHal::init() {
   // Apply runtime overrides
   apply_runtime_overrides();
 
-  // Clear all interrupt flags
   clear_interrupt_flags();
 
-  // Clear FIFO
   clear_fifo();
 
   initialized_ = true;
@@ -256,7 +227,6 @@ bool Cmt2300aHal::is_chip_connected() {
 void Cmt2300aHal::write_full_config() {
   ESP_LOGD(TAG, "Writing 96-byte register configuration...");
 
-  // Write 6 configuration banks
   write_bank(CMT_BANK_ADDR, NARTIS_CMT_BANK, CMT_BANK_SIZE);
   write_bank(SYSTEM_BANK_ADDR, NARTIS_SYSTEM_BANK, SYSTEM_BANK_SIZE);
   // Frequency bank written per-channel (default to CH0). Honor the custom-channel
@@ -271,30 +241,27 @@ void Cmt2300aHal::write_full_config() {
 }
 
 void Cmt2300aHal::apply_runtime_overrides() {
-  // ---- Firmware post-config patch (cmt_post_config @ 0x13666) ----
-  // Verified against fw/dump-spi/dump.txt lines 20-22 (real CIU init). These
-  // override the RFPDK bank defaults and are required for correct on-air
+  // ---- Post-config patch ----
+  // These override the RFPDK bank defaults and are required for correct on-air
   // operation. Without them the chip TXes on the wrong half of the freq bank
   // and uses a sync word the meter rejects.
   //
-  // pair-ours-05.iq confirmed the SYS2 patch alone moves TX from the freq
-  // bank's "RX-half" (434.10 MHz @ Ch0 = wrong) to the "TX-half"
-  // (433.82 MHz @ Ch0 = correct, matching every spi2/iq3 real-CIU capture).
+  // The SYS2 patch alone moves TX from the freq bank's "RX-half" (434.10 MHz @
+  // Ch0 = wrong) to the "TX-half" (433.82 MHz @ Ch0 = correct).
 
   // SYS2 (0x0D): clear top 3 bits — PLL/XO trim cluster. This is what flips
   // the chip onto the TX-half of the freq bank (regs 0x1C..0x1F).
   update_reg(REG_SYS2, 0xE0, 0x00);
 
-  // Sync word patch (firmware rf_change_sync_word(1), "normal" mode = 0x72 F6
-  // 55 55). RFPDK default was F6 55 55 55 — meter's correlator won't lock on
-  // the wrong byte. Persistent EEPROM byte struct[0x3D] = 0x01 in every real
-  // CIU we have selects this variant.
+  // Sync word patch ("normal" mode = 0x72 F6 55 55). RFPDK default was
+  // F6 55 55 55 — the meter's correlator won't lock on the wrong byte. The
+  // stock CIU selects this variant via a persistent EEPROM byte.
   write_reg(REG_PKT10, 0x72);
   write_reg(REG_PKT11, 0xF6);
   write_reg(REG_PKT12, 0x55);
   write_reg(REG_PKT13, 0x55);
 
-  // TX power = 14 dBm (firmware FUN_0001329A, table level 0x0E).
+  // TX power = 14 dBm (table level 0x0E).
   write_reg(REG_CMT4, 0x1C);
   write_reg(REG_TX8,  0x56);
   write_reg(REG_TX9,  0x0B);
@@ -304,10 +271,10 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // FIFO merge: combine TX+RX FIFO into 64-byte single buffer
   // REG_SYS11 (0x16): (reg & 0xE0) | 0x12  — merge configuration
   update_reg(REG_SYS11, static_cast<uint8_t>(~MASK_FIFO_MERGE_CFG), FIFO_MERGE_VALUE);
-  // REG_FIFO_CTL (0x69): set FIFO_MERGE_EN (firmware: FIFO_CTL |= 0x02)
+  // REG_FIFO_CTL (0x69): set FIFO_MERGE_EN (FIFO_CTL |= 0x02)
   update_reg(REG_FIFO_CTL, MASK_FIFO_MERGE_EN, MASK_FIFO_MERGE_EN);
 
-  // FIFO threshold — firmware uses 0x0F (15 bytes), not 0x0C.
+  // FIFO threshold — 0x0F (15 bytes), not 0x0C.
   update_reg(REG_PKT29, MASK_FIFO_TH, FIFO_TH_VALUE);
 
   // Route the GPIO3 pad to INT2 — this is the only interrupt pad we wire to the
@@ -316,27 +283,22 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // POR defaults (unconnected on our board).
   update_reg(REG_IO_SEL, MASK_GPIO3_SEL, GPIO3_SEL_INT2);
 
-  // INT2 source = RX_FIFO_TH, ACTIVE-HIGH polarity. The firmware uses active
-  // high (it preserves the POR-default polar bit = 0 and reads "pin HIGH =
-  // event"); SETTING the polar bit makes the line active-LOW (idle-high),
-  // which falsely reads as "packet done" every poll. So clear it (= 0).
+  // INT2 source = RX_FIFO_TH, ACTIVE-HIGH polarity. Active high preserves the
+  // POR-default polar bit = 0 and reads "pin HIGH = event"; SETTING the polar
+  // bit makes the line active-LOW (idle-high), which falsely reads as "packet
+  // done" every poll. So clear it (= 0).
   // The live signal (TX_FIFO_TH during TX, RX_FIFO_TH during RX) lands on
-  // INT2 → the GPIO3 pad we poll. Default to RX_FIFO_TH, matching the firmware
-  // (cmt_post_config: INT2=0x0C).
+  // INT2 → the GPIO3 pad we poll. Default to RX_FIFO_TH (INT2=0x0C).
   update_reg(REG_INT2_CTL, MASK_INT2_SEL, INT_SEL_RX_FIFO_TH);
   update_reg(REG_INT2_CTL, MASK_INT_POLAR, 0x00);
 
-  // Firmware INT_EN = 0x39 (PKT_DONE | PREAM_OK | SYNC_OK | TX_DONE).
+  // INT_EN = 0x39 (PKT_DONE | PREAM_OK | SYNC_OK | TX_DONE).
   // FIFO_TH on the GPIO follows the INT mux regardless of INT_EN.
   write_reg(REG_INT_EN, 0x39);
 
   ESP_LOGD(TAG, "Runtime overrides applied (post-config patch + FIFO merge=64B; "
                 "GPIO3 -> INT2, active-high, RX_FIFO_TH)");
 }
-
-/* ================================================================
- * State Machine Control
- * ================================================================ */
 
 uint8_t Cmt2300aHal::get_state() {
   return spi_read_reg(REG_MODE_STA) & MASK_CHIP_MODE_STA;
@@ -370,7 +332,6 @@ bool Cmt2300aHal::go_rx() {
     if (!go_standby()) return false;
   }
 
-  // Clear FIFO and interrupt flags before RX
   clear_rx_fifo();
   clear_interrupt_flags();
 
@@ -395,7 +356,6 @@ bool Cmt2300aHal::go_tx() {
     if (!go_standby()) return false;
   }
 
-  // Clear interrupt flags before TX
   clear_interrupt_flags();
 
   spi_write_reg(REG_MODE_CTL, GO_TFS);
@@ -413,10 +373,6 @@ bool Cmt2300aHal::go_tx() {
   return true;
 }
 
-/* ================================================================
- * Frequency Channel Selection
- * ================================================================ */
-
 void Cmt2300aHal::set_frequency_channel(uint8_t ch) {
   if (ch >= NUM_CHANNELS) {
     ESP_LOGW(TAG, "Invalid channel %d (max %d)", ch, NUM_CHANNELS - 1);
@@ -432,7 +388,7 @@ void Cmt2300aHal::set_frequency_channel(uint8_t ch) {
   const uint8_t (*channels)[8] = use_custom_channels_ ? NARTIS_CUSTOM_CHANNELS : NARTIS_FREQ_CHANNELS;
   write_bank(FREQUENCY_BANK_ADDR, channels[ch], FREQUENCY_BANK_SIZE);
 
-  ESP_LOGD(TAG, "Set frequency channel %d (%s preset)", ch, use_custom_channels_ ? "custom" : "firmware");
+  ESP_LOGD(TAG, "Set frequency channel %d (%s preset)", ch, use_custom_channels_ ? "custom" : "default");
 }
 
 void Cmt2300aHal::set_rx_channel(uint8_t ch) {
@@ -452,12 +408,8 @@ void Cmt2300aHal::set_rx_channel(uint8_t ch) {
   write_bank(FREQUENCY_BANK_ADDR, channels[ch], 4);
 
   ESP_LOGD(TAG, "Set RX channel %d (%s preset, RX-only — TX unchanged)",
-           ch, use_custom_channels_ ? "custom" : "firmware");
+           ch, use_custom_channels_ ? "custom" : "default");
 }
-
-/* ================================================================
- * FIFO Operations
- * ================================================================ */
 
 void Cmt2300aHal::clear_fifo() {
   write_reg(REG_FIFO_CLR, FIFO_CLR_RX | FIFO_CLR_TX);
@@ -496,7 +448,7 @@ size_t Cmt2300aHal::read_fifo(uint8_t *data, size_t max_len) {
 }
 
 void Cmt2300aHal::set_tx_payload_length(uint16_t len) {
-  // PKT14 (0x45): bits[6:4] = PAYLOAD_LENG[10:8], other bits cleared (matches firmware).
+  // PKT14 (0x45): bits[6:4] = PAYLOAD_LENG[10:8], other bits cleared.
   // PKT15 (0x46): PAYLOAD_LENG[7:0].
   write_reg(REG_PKT14, static_cast<uint8_t>((len >> 8) & 0x07) << 4);
   write_reg(REG_PKT15, static_cast<uint8_t>(len & 0xFF));
@@ -510,11 +462,11 @@ void Cmt2300aHal::set_rx_payload_length() {
 }
 
 uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
-  // Replica of firmware rssi_channel_select (0x000134A4).
+  // Picks the quietest channel.
   // Per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,
   //              6 more samples with 2 ms between each, track running max & min,
   //              score = (sum_of_6 - max - min) / 4.
-  // Channel selection (firmware behavior, including the ch0-never-picked quirk):
+  // Channel selection (preserves the ch0-never-picked quirk):
   //   - best_ch starts at 0
   //   - ch1 always seeds best_ch=1, best_score=ch1_score
   //   - ch2/ch3 replace only if strictly less than current best
@@ -526,7 +478,7 @@ uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
     go_standby();
     set_frequency_channel(ch);
-    // Switch SYS11 to RSSI-valid mode (firmware FUN_00013daa: (SYS11 & 0xE0) | 0x01)
+    // Switch SYS11 to RSSI-valid mode: (SYS11 & 0xE0) | 0x01
     update_reg(REG_SYS11, 0x1F, 0x01);
 
     spi_write_reg(REG_MODE_CTL, GO_RX);
@@ -557,7 +509,7 @@ uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
     ESP_LOGD(TAG, "scan_channels: ch%u score=%d dBm (min=%d max=%d)",
              ch, score, min_seen, max_seen);
 
-    // Firmware comparison logic — preserve ch0-unreachable quirk verbatim.
+    // Comparison logic — preserve the ch0-unreachable quirk.
     if (ch == 1) {
       best_ch = 1;
       best_score = score;
@@ -577,8 +529,8 @@ uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
 }
 
 bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
-  // Matching firmware cmt_tx_chunked_write (0x131B8): fill FIFO with first 64B, enter TX,
-  // then poll TX_FIFO_TH via the GPIO3/INT2 pin to refill remaining data in 15-byte chunks.
+  // Fill FIFO with first 64B, enter TX, then poll TX_FIFO_TH via the GPIO3/INT2
+  // pin to refill remaining data in 15-byte chunks.
 
   if (!go_standby()) return false;
 
@@ -599,7 +551,6 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   // Configure INT1 = TX_FIFO_TH (fires when FIFO drops below threshold)
   set_int_source(INT_SEL_TX_FIFO_TH);
 
-  // Write first chunk (up to 64 bytes)
   size_t initial = (len > FIFO_SIZE_MERGED) ? FIFO_SIZE_MERGED : len;
   spi_write_fifo(data, initial);
   size_t written = initial;
@@ -636,8 +587,8 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
 
     // Refill when the TX FIFO has DRAINED to/below threshold. Per the datasheet
     // INT-source table, TX_FIFO_TH = 1 means "unread TX bytes OVER FIFO_TH" (still
-    // full); it reads 0 once drained to <= FIFO_TH (room for another chunk). The
-    // firmware (cmt_tx_chunked_write @ 0x131B8) refills on this flag CLEAR.
+    // full); it reads 0 once drained to <= FIFO_TH (room for another chunk).
+    // Refill on this flag CLEAR.
     //
     // BUG FIX: we previously polled GPIO3 (active-high TX_FIFO_TH) and refilled
     // while it was HIGH — i.e. while the FIFO was still FULL — which overflowed
@@ -664,10 +615,6 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   return false;
 }
 
-/* ================================================================
- * Interrupt & Status
- * ================================================================ */
-
 uint8_t Cmt2300aHal::get_interrupt_flags() {
   return spi_read_reg(REG_INT_FLAG);
 }
@@ -677,7 +624,6 @@ uint8_t Cmt2300aHal::get_int_clr1() {
 }
 
 void Cmt2300aHal::clear_interrupt_flags() {
-  // Write clear bits to INT_CLR1 and INT_CLR2
   write_reg(REG_INT_CLR1, CLR1_TX_DONE_CLR | CLR1_SL_TMO_CLR | CLR1_RX_TMO_CLR);
   write_reg(REG_INT_CLR2, CLR2_LBD_CLR | CLR2_PREAM_OK_CLR | CLR2_SYNC_OK_CLR |
                           CLR2_NODE_OK_CLR | CLR2_CRC_OK_CLR | CLR2_PKT_DONE_CLR);
@@ -692,7 +638,7 @@ bool Cmt2300aHal::is_tx_done() {
 }
 
 int8_t Cmt2300aHal::get_rssi_dbm() {
-  // REG 0x70 returns unsigned 0..255; dBm = regval - 128 (firmware FUN_00013f94).
+  // REG 0x70 returns unsigned 0..255; dBm = regval - 128.
   int val = static_cast<int>(spi_read_reg(REG_RSSI_DBM)) - 128;
   return static_cast<int8_t>(val);
 }
@@ -746,10 +692,6 @@ bool Cmt2300aHal::test_gpio3_wiring() {
   return ok;
 }
 
-/* ================================================================
- * Chunked RX — for packets larger than 64-byte FIFO
- * ================================================================ */
-
 void Cmt2300aHal::set_int_source(uint8_t source) {
   // INT2 surfaces on the GPIO3 pad — the line we poll (TX_FIFO_TH during TX,
   // RX_FIFO_TH during RX). Preserves the polarity bit.
@@ -767,11 +709,11 @@ void Cmt2300aHal::prepare_rx_session() {
 }
 
 size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
-  // RX_FIFO_TH-driven chunk drain — the firmware's mechanism. INT2 (=RX_FIFO_TH)
-  // surfaces on the GPIO3 pin and is HIGH while >= FIFO_TH_VALUE bytes sit in the
-  // RX FIFO. We poll that pin (the firmware reads the chip's INT output pin via
-  // MCU GPIO too; the SPI status regs 0x6D/0x6E read 0xFF here — Control2 bank —
-  // so they're unusable). Drain full threshold chunks while the line is asserted.
+  // RX_FIFO_TH-driven chunk drain. INT2 (=RX_FIFO_TH) surfaces on the GPIO3 pin
+  // and is HIGH while >= FIFO_TH_VALUE bytes sit in the RX FIFO. We poll that pin
+  // (the stock CIU reads the chip's INT output pin via MCU GPIO too; the SPI
+  // status regs 0x6D/0x6E read 0xFF here — Control2 bank — so they're unusable).
+  // Drain full threshold chunks while the line is asserted.
   //
   // The trailing < FIFO_TH_VALUE bytes of a frame never raise RX_FIFO_TH; the
   // caller (poll_rx_) reads that tail by frame length once it has arrived.

@@ -162,10 +162,12 @@ text_sensor:
   - platform: nartis_rf_meter
     name: "Часы счётчика"
     obis_code: "0.0.1.0.0.255"
-    obis_class: 8       # COSEM Clock — данные парсятся как дата/время
+    obis_class: 8
 ```
 
 # Примеры конфигураций
+
+Примечание: В названиях сенсоров рекомендуется использовать только буквы латинского алфавита.
 
 ### Трёхфазный счётчик — базовые показания
 
@@ -187,7 +189,7 @@ nartis_rf_meter:
 
 sensor:
   - platform: nartis_rf_meter
-    name: "Напряжение фаза A"
+    name: "Voltage A"  # Напряжение фаза A
     obis_code: "1.0.32.7.0.255"
     unit_of_measurement: V
     accuracy_decimals: 1
@@ -197,7 +199,7 @@ sensor:
       - multiply: 0.1
 
   - platform: nartis_rf_meter
-    name: "Напряжение фаза B"
+    name: "Voltage B" # Напряжение фаза B
     obis_code: "1.0.52.7.0.255"
     unit_of_measurement: V
     accuracy_decimals: 1
@@ -207,7 +209,7 @@ sensor:
       - multiply: 0.1
 
   - platform: nartis_rf_meter
-    name: "Напряжение фаза C"
+    name: "Voltage C" # Напряжение фаза C
     obis_code: "1.0.72.7.0.255"
     unit_of_measurement: V
     accuracy_decimals: 1
@@ -217,7 +219,7 @@ sensor:
       - multiply: 0.1
 
   - platform: nartis_rf_meter
-    name: "Ток фаза A"
+    name: "Current A" # Ток фаза A
     obis_code: "1.0.31.7.0.255"
     unit_of_measurement: A
     accuracy_decimals: 2
@@ -227,7 +229,27 @@ sensor:
       - multiply: 0.1
 
   - platform: nartis_rf_meter
-    name: "Активная мощность (сумма)"
+    name: "Current B" # Ток фаза B
+    obis_code: "1.0.51.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Current C" # Ток фаза C
+    obis_code: "1.0.71.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Active power" # Активная мощность (сумма)
     obis_code: "1.0.1.7.0.255"
     unit_of_measurement: W
     accuracy_decimals: 1
@@ -235,7 +257,7 @@ sensor:
     state_class: measurement
 
   - platform: nartis_rf_meter
-    name: "Энергия импорт (T0)"
+    name: "Energy total" # Энергия импорт
     obis_code: "1.0.1.8.0.255"
     unit_of_measurement: kWh
     accuracy_decimals: 0
@@ -243,7 +265,23 @@ sensor:
     state_class: total_increasing
 
   - platform: nartis_rf_meter
-    name: "Частота сети"
+    name: "Energy T1" # Энергия импорт - Тариф 1
+    obis_code: "1.0.1.8.1.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
+    name: "Energy T2" # Энергия импорт - Тариф 1
+    obis_code: "1.0.1.8.2.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
+    name: Frequency # Частота сети
     obis_code: "1.0.14.7.0.255"
     unit_of_measurement: Hz
     accuracy_decimals: 2

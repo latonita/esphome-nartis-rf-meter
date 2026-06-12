@@ -5,10 +5,10 @@
  * Knows protocol but NOT RF details.
  * Produces/consumes raw byte buffers that Layer 2 (RF) transports.
  *
- * Key finding: Nartis CIU firmware does NOT use standard DLMS AARQ/AARE
+ * Key finding: The Nartis meter does NOT use standard DLMS AARQ/AARE
  * association. Instead, each register read is a self-contained proprietary
- * request with format: C0 01 C1 00 [class_id] [obis] [attr_id] [auth_flag]
- * (firmware nartis_build_read (0x8CAC)). No separate association or release phase.
+ * request with format: C0 01 C1 00 [class_id] [obis] [attr_id] [auth_flag].
+ * No separate association or release phase.
  */
 
 #pragma once
@@ -50,10 +50,7 @@ class DlmsClient {
  public:
   DlmsClient() = default;
 
-  /// Configure DLMS credentials
   void set_credentials(const char *password, uint16_t client_addr, uint16_t server_addr);
-
-  /* ---- APDU Builders (TX) ---- */
 
   /// Single COSEM attribute reference for a get-request list entry.
   struct AttrSpec {
@@ -62,11 +59,10 @@ class DlmsClient {
     uint8_t attr_id;
   };
 
-  static constexpr uint8_t MAX_LIST_ATTRS = 10;  // firmware caps at 10 per request
+  static constexpr uint8_t MAX_LIST_ATTRS = 10;  // the meter caps at 10 per request
 
   /// Build a `get-request-with-list` APDU containing one or more attribute
-  /// references. Format (matches dump-spi2 frame #0 / firmware
-  /// nartis_build_read 0x8cac):
+  /// references. Format:
   ///   c0 03  c1  <count>
   ///   <count × { class-id (2B BE) | OBIS (6B) | attr-id (1B) | access-sel (1B = 0x00) }>
   /// Returns total bytes written, or 0 on error.
@@ -79,8 +75,7 @@ class DlmsClient {
                             const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
 
   /// Build a `get-request-normal` APDU (single attribute, c0 01 form).
-  /// Format (verified against spi4 pairing capture frame #10 — the FIRST
-  /// post-pairing read the real CIU issues):
+  /// This is the FIRST post-pairing read the meter issues. Format:
   ///   c0 01  c1  <class-id 2B BE>  <OBIS 6B>  <attr-id 1B>  <access-sel 1B = 0x00>
   /// The freshly-paired meter requires this normal-get (answered by a direct
   /// 0x43, no keepalive) before it will engage the with-list flow.
@@ -88,9 +83,7 @@ class DlmsClient {
   size_t build_get_request_normal(uint8_t *out, size_t max,
                                   const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
 
-  /* ---- APDU Parsers (RX) ---- */
-
-  /// Parse a `get-response-with-list` (firmware-style multi-result response).
+  /// Parse a `get-response-with-list` (multi-result response).
   /// Strips the Nartis prefix (0d fd f8 + 2B tag) and IEC 62056-47 wrapper if
   /// present. Then walks the result list, filling `values[]` from left to right.
   ///
@@ -112,8 +105,6 @@ class DlmsClient {
 
   /// Legacy single-attribute response parser (kept for backwards compat).
   bool parse_read_response(const uint8_t *data, size_t len, DlmsValue *value_out);
-
-  /* ---- Value conversion (shared by all sensors) ---- */
 
   /// Convert a raw COSEM value (type tag + big-endian value bytes) to a float
   /// for numeric sensors. Unsupported/compound types return 0.

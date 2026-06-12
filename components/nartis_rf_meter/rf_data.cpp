@@ -2,12 +2,6 @@
  * Nartis RF Data Layer — Implementation
  *
  * CRC-16/DNP framing (single + dual modes), AES-128-GCM, packet assembly.
- *
- * Verified against:
- *   - 104 outgoing SPI-captured frames (fifo.txt, Pair B)
- *   - 104 incoming SPI-captured frames (Pair B meter responses)
- *   - Ghidra decompile of rf_build_frame, rf_parse_frame, crc_block_insert,
- *     crc_block_deframe, derive_rf_address
  */
 
 #include "rf_data.h"
@@ -22,17 +16,14 @@
 // esp-idf framework the component link does not even resolve mbedtls_aes_* —
 // so we depend on NO external crypto library. The on-air cipher is AES-128-GCM
 // with AAD = [01 29 L 00], nonce = permuted CIU address + 4-byte counter (BE),
-// 12-byte tag (confirmed by decrypting real frames, dump-spi2/decoded_sequence).
+// 12-byte tag (confirmed by decrypting real frames).
 
 namespace esphome::nartis_rf_meter {
 
 static const char *const TAG = "rf_data";
 
-/* ================================================================
- * CRC-16/DNP Lookup Table
- * Polynomial 0x3D65, init 0x0000, no reflection, xorout 0xFFFF.
- * Generated from firmware flash.bin at 0xB77C (256 entries).
- * ================================================================ */
+// CRC-16/DNP lookup table, 256 entries.
+// Polynomial 0x3D65, init 0x0000, no reflection, xorout 0xFFFF.
 // clang-format off
 const uint16_t RfDataLayer::crc_table_[256] = {
     0x0000, 0x3D65, 0x7ACA, 0x47AF, 0xF594, 0xC8F1, 0x8F5E, 0xB23B,
@@ -70,10 +61,6 @@ const uint16_t RfDataLayer::crc_table_[256] = {
 };
 // clang-format on
 
-/* ================================================================
- * CRC-16/DNP
- * ================================================================ */
-
 uint16_t RfDataLayer::crc16_calc(const uint8_t *data, size_t len) {
   uint16_t crc = CRC16_INIT;
   for (size_t i = 0; i < len; i++) {
@@ -90,8 +77,7 @@ bool RfDataLayer::crc16_verify(const uint8_t *data, size_t len) {
 }
 
 /* ================================================================
- * CRC Insert / Strip  —  matches firmware crc_block_insert (0xB9B2)
- * and crc_block_deframe (0xBE10) for the encrypted-path mode (param_3 != 0).
+ * CRC Insert / Strip (encrypted-path mode).
  *
  * Two on-air layouts:
  *   A) body_size <= 126: single CRC at end. Frame size = body_size + 2.
@@ -102,9 +88,8 @@ bool RfDataLayer::crc16_verify(const uint8_t *data, size_t len) {
 
 size_t RfDataLayer::crc_insert(uint8_t *buf, size_t body_size, size_t out_max) {
   if (body_size <= 126) {
-    // Single CRC at end
     if (body_size + 2 > out_max) return 0;
-    // CRITICAL: the firmware (crc_block_insert @0xB9B2) sets the length byte
+    // CRITICAL: the meter sets the length byte
     // (buf[0] += 2) BEFORE computing the CRC, so the CRC covers the final
     // length-1 value. Set it first here too, otherwise the CRC is computed over
     // buf[0]==0 and every TX frame fails the meter's CRC check.
@@ -114,9 +99,8 @@ size_t RfDataLayer::crc_insert(uint8_t *buf, size_t body_size, size_t out_max) {
     buf[body_size + 1] = static_cast<uint8_t>(crc & 0xFF);
     return body_size + 2;
   } else {
-    // Dual CRC mode
     if (body_size + 4 > out_max) return 0;
-    // Length byte covers the final frame (firmware: buf[0] += 4) — set before CRC1.
+    // Length byte covers the final frame (buf[0] += 4) — set before CRC1.
     buf[RF_TX_LENGTH] = static_cast<uint8_t>((body_size + 4) - 1);
     // Shift bytes [0x7E..body_size-1] right by 2 to make room for CRC1.
     // Use memmove for overlapping region.
@@ -140,14 +124,12 @@ size_t RfDataLayer::crc_insert(uint8_t *buf, size_t body_size, size_t out_max) {
 int RfDataLayer::crc_strip(uint8_t *buf, size_t frame_size) {
   if (frame_size < 3) return -1;
   if (frame_size <= CRC_DUAL_THRESHOLD) {
-    // Single CRC
     if (!crc16_verify(buf, frame_size)) {
       ESP_LOGW(TAG, "CRC fail (single, size=%u)", static_cast<unsigned>(frame_size));
       return -1;
     }
     return static_cast<int>(frame_size - 2);
   } else {
-    // Dual CRC
     if (frame_size < 0x82) return -1;  // need at least 0x7E + 2 + 0 + 2
     // Verify CRC1
     uint16_t crc1_obs  = (static_cast<uint16_t>(buf[CRC1_OFFSET]) << 8) | buf[CRC1_OFFSET + 1];
@@ -171,12 +153,11 @@ int RfDataLayer::crc_strip(uint8_t *buf, size_t frame_size) {
 }
 
 /* ================================================================
- * AES-128-GCM  (firmware cipher; verified by decrypting real frames)
+ * AES-128-GCM  (verified by decrypting real frames)
  *
  *   key   = ASCII(meter_serial)[12] + BD 02 9B BE
  *   nonce = permuted CIU address (8B) + counter (4B, big-endian)
  *           permutation: prefix[i] = addr_wire[{2,3,4,5,0,1,6,7}[i]]
- *           (firmware gcm_init_nonce_prefix @0x12DB4)
  *   AAD   = { 0x01, 0x29, enc_len, 0x00 }  (= on-air frame bytes [13..16])
  *   tag   = 12 bytes
  *
@@ -348,7 +329,7 @@ bool gcm128(const uint8_t key[16], const uint8_t nonce[12], const uint8_t *aad, 
 void RfDataLayer::build_nonce(uint8_t nonce[AES_NONCE_SIZE], const RfAddress &addr, uint32_t counter) const {
   uint8_t aw[8];
   addr.to_bytes(aw);  // on-wire order: dev_lo dev_hi hash0 hash1 hash2 hash3 group type
-  // Permute to the firmware's nonce prefix: [2,3,4,5,0,1,6,7].
+  // Permute to the nonce prefix: [2,3,4,5,0,1,6,7].
   static const uint8_t kPerm[8] = {2, 3, 4, 5, 0, 1, 6, 7};
   for (uint8_t i = 0; i < 8; i++) nonce[i] = aw[kPerm[i]];
   nonce[8]  = static_cast<uint8_t>((counter >> 24) & 0xFF);
@@ -421,10 +402,6 @@ bool RfDataLayer::extract_session_key(const uint8_t *payload, size_t len,
   return false;
 }
 
-/* ================================================================
- * Configuration
- * ================================================================ */
-
 void RfDataLayer::set_address(const RfAddress &addr) { address_ = addr; }
 
 void RfDataLayer::set_meter_address(const RfAddress &addr) {
@@ -440,7 +417,7 @@ void RfDataLayer::set_aes_key(const uint8_t key[AES_KEY_SIZE]) {
  * Channel byte: (chan_idx << 6) | (quality & 0x3F)
  *   quality = clamp((rssi_dbm + 130) / 2, 1, 62)
  *
- * Verified against fifo.txt:
+ * Verified examples:
  *   -68 dBm → quality 31 → channel 1 gives 0x5F, channel 2 gives 0x9F
  *    -6 dBm → quality 62 (saturated) → channel 1 gives 0x7E
  * ================================================================ */
@@ -450,10 +427,6 @@ uint8_t RfDataLayer::compose_channel_byte(uint8_t channel_idx, int8_t rssi_dbm) 
   if (q > 62) q = 62;
   return static_cast<uint8_t>(((channel_idx & 0x3) << 6) | (q & 0x3F));
 }
-
-/* ================================================================
- * Frame Building (TX, CIU→meter)
- * ================================================================ */
 
 size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
                                 RfFrameType type, uint8_t sequence,
@@ -466,7 +439,6 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
   const bool encrypted   = (type == RfFrameType::ACK || type == RfFrameType::BEACON);
   const uint8_t marker   = (type == RfFrameType::PLAIN_DATA) ? MODE_MARKER_SPECIAL : MODE_MARKER_NORMAL;
 
-  // Header [0..14]
   out[RF_TX_LENGTH]       = 0;  // filled at the end
   out[RF_TX_FLAGS]        = static_cast<uint8_t>(type);
   address_.to_bytes(out + RF_TX_ADDR);
@@ -487,8 +459,8 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
       ESP_LOGE(TAG, "Output buffer too small");
       return 0;
     }
-    // Counter management — matches firmware rf_prepare_and_queue @ 0xBC3E:
-    //   ctx counter increments ONLY when the sequence byte changes from the
+    // Counter management:
+    //   the counter increments ONLY when the sequence byte changes from the
     //   previous TX. Same sequence ⇒ reuse the same counter (e.g. beacon
     //   retransmissions of identical content).
     if (!has_sent_first_tx_ || sequence != last_tx_sequence_) {
@@ -504,7 +476,6 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
     out[RF_TX_ENC_COUNTER + 2] = static_cast<uint8_t>((frame_counter_ >> 8) & 0xFF);
     out[RF_TX_ENC_COUNTER + 3] = static_cast<uint8_t>(frame_counter_ & 0xFF);
 
-    // Copy plaintext to [21..] and encrypt in place; AES-GCM appends the tag.
     memcpy(out + RF_TX_ENC_CIPHER, payload, payload_len);
     size_t enc_len = aes_gcm_encrypt(out + RF_TX_ENC_CIPHER, payload_len,
                                      out_max - RF_TX_ENC_CIPHER - 4, frame_counter_);
@@ -522,7 +493,6 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
     body_size = RF_TX_HDR_SIZE + payload_len;
   }
 
-  // Insert CRC(s)
   size_t total = crc_insert(out, body_size, out_max);
   if (total == 0) return 0;
 
@@ -531,7 +501,7 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
 }
 
 /* ================================================================
- * Frame Parsing (RX, meter→CIU)
+ * Frame Parsing (RX, meter→CIU).
  *
  * Steps:
  *   1. Read length-1 from [0], validate against in_len.
@@ -548,7 +518,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
     ESP_LOGW(TAG, "Frame too short: %u bytes", static_cast<unsigned>(in_len));
     return static_cast<int>(ParseResult::ERR_LEN);
   }
-  // Firmware master_rx_handler upper bound: rx_len <= 0x122 (290).
+  // Meter upper bound: rx_len <= 0x122 (290).
   if (in_len > 0x122) {
     ESP_LOGW(TAG, "Frame too large: %u > 0x122 bytes", static_cast<unsigned>(in_len));
     return static_cast<int>(ParseResult::ERR_LEN);
@@ -585,17 +555,17 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
   }
 
   // Plain vs encrypted branch — discriminate by frame_type, NOT by bytes
-  // [11..12]. The firmware's rf_parse_frame uses (work[11]==0 && work[12]==0)
+  // [11..12]. The meter uses (work[11]==0 && work[12]==0)
   // as a "plain" indicator, but those bytes are actually the high two bytes
-  // of the embedded 4-byte target-CIU hash echo. Pair-A/B/C/D in our dataset
-  // all have CIU hashes whose top 2 bytes are 0x00, so the firmware's check
-  // passes accidentally. Our CIU has hash 00 01 26 5D — byte [12] = 0x01,
+  // of the embedded 4-byte target-CIU hash echo. The meter addresses we
+  // observed all have CIU hashes whose top 2 bytes are 0x00, so the meter's
+  // check passes accidentally. Our CIU has hash 00 01 26 5D — byte [12] = 0x01,
   // which falsely triggers the encrypted branch.
   //
-  // Every RX frame observed across spi2/iq3 is plain at the transport layer.
+  // Every RX frame we observed is plain at the transport layer.
   // 0x43 (large RESPONSE) and 0x53 (SESSION_SETUP) carry a *nested* encrypted
   // body, but the outer envelope is plain and the parser hands its payload
-  // to comm_event_handler (in our case, the application layer) which deals
+  // to the application layer which deals
   // with the nesting.
   const uint8_t frame_type = work[RF_RX_TYPE];
   const bool is_plain = (frame_type == 0x06 || frame_type == 0x40 ||
@@ -613,7 +583,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
     memcpy(payload_out, work + RF_RX_PAYLOAD, payload_len);
     return static_cast<int>(payload_len);
   } else {
-    // Encrypted RX (per firmware rf_parse_frame encrypted branch).
+    // Encrypted RX branch.
     // [13] enc_data_len, [14] must be 0, [15..18] counter BE, [19..] cipher+MIC.
     if (body_size < 19 + AES_TAG_SIZE) {
       ESP_LOGW(TAG, "Encrypted RX body too short: %d", body_size);
@@ -629,7 +599,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
                        (static_cast<uint32_t>(work[17]) << 8) |
                        static_cast<uint32_t>(work[18]);
 
-    // Firmware exact length math: enc_data_len + must_be_zero + 0x1F == parse_len
+    // Exact length math: enc_data_len + must_be_zero + 0x1F == parse_len
     // ⇒ enc_data_len + 0 + 0x1F == body_size  (since body_size is post-CRC parse_len).
     if (static_cast<size_t>(enc_data_len) + 0x1F != static_cast<size_t>(body_size)) {
       ESP_LOGW(TAG, "Encrypted RX length math: L+0x1F (%u) != body_size (%d)",
@@ -638,7 +608,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
     }
 
     // Replay protection: reject any counter ≤ the highest counter ever accepted.
-    // Firmware frame_counter_validate @ 0xC078 returns 9 (replay) on this case.
+    // The meter returns 9 (replay) on this case.
     if (counter <= last_rx_counter_) {
       ESP_LOGW(TAG, "Encrypted RX replay rejected: counter 0x%08X ≤ last 0x%08X",
                static_cast<unsigned>(counter), static_cast<unsigned>(last_rx_counter_));
@@ -661,7 +631,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
 /* ================================================================
  * Nested encrypted frame (inside RX 0x43 plain payload)
  *
- * Layout (verified on all RX 0x43 frames in dataset):
+ * Layout (verified on all observed RX 0x43 frames):
  *   [0..1]   2 bytes prefix (last 2 bytes of CIU serial_hash typically)
  *   [2..3]   CD 2C
  *   [4..5]   50 25 (CIU's group/type)
@@ -674,7 +644,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
  *   [16..15+L']    inner ciphertext
  *   [16+L'..27+L'] inner MIC (12 bytes)
  *
- * Nonce: per firmware, uses an address derived from the embedded prefix +
+ * Nonce: the meter uses an address derived from the embedded prefix +
  * CIU constants. For now we use the configured CIU address (set_address)
  * as the nonce prefix — works for sessions where the meter responds to
  * a known CIU.
@@ -715,7 +685,6 @@ int RfDataLayer::parse_nested_encrypted(const uint8_t *payload, size_t payload_l
     return static_cast<int>(ParseResult::ERR_REPLAY);
   }
 
-  // Copy ciphertext+MIC to mutable buffer and decrypt.
   uint8_t work[MAX_RF_FRAME_SIZE];
   if (enc_data_len + AES_TAG_SIZE > sizeof(work)) return static_cast<int>(ParseResult::ERR_LEN);
   memcpy(work, payload + 16, enc_data_len + AES_TAG_SIZE);
@@ -757,11 +726,8 @@ int RfDataLayer::peek_nested_plain(const uint8_t *payload, size_t payload_len,
   return enc_data_len;
 }
 
-/* ================================================================
- * Channel Selection
- * ================================================================ */
 uint8_t RfDataLayer::select_best_channel(const int8_t rssi[4]) {
-  // Firmware (rssi_channel_select / 0x134A4) picks the quietest channel
+  // The meter picks the quietest channel
   // (lowest measured RSSI). Channel 0 is scanned but never selected.
   uint8_t best = 1;
   int8_t best_rssi = rssi[1];

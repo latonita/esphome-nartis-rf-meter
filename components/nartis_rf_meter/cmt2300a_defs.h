@@ -340,8 +340,8 @@ static constexpr uint8_t SPI_WRITE = 0x00;  // Bit 7 = 0 for write
 static constexpr uint8_t SPI_READ = 0x80;   // Bit 7 = 1 for read
 
 /* ================================================================
- * Nartis Firmware Register Configuration
- * Verbatim from flash.bin at 0x1373C (96 bytes across 6 banks)
+ * Nartis Register Configuration
+ * 96 bytes across 6 banks
  * ================================================================ */
 
 // clang-format off
@@ -381,15 +381,15 @@ static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
 /* Non-standard ("invented") frequency presets.
  *
  * Opt-in via YAML `use_non_standard_channels: true`. This is the MEASURED
- * meter reply-frequency table, NOT a guess. DISCOVERY (iq3 captures 16/17/18 +
- * real-CIU f01/f02): the advertised channel index in frame[12] bits 7:6 COMMANDS
- * the meter's reply frequency — the meter answers on a per-channel frequency and
- * the CIU listens there (TX always stays on Ch0/433.82, the meter's wake freq).
+ * meter reply-frequency table, NOT a guess. The advertised channel index in
+ * frame[12] bits 7:6 COMMANDS the meter's reply frequency — the meter answers
+ * on a per-channel frequency and the CIU listens there (TX always stays on
+ * Ch0/433.82, the meter's wake freq).
  *
  * The meter replies on the advertised channel's STANDARD TX-half frequency:
- *   ch0->433.82  ch1->433.30  ch2->434.26  ch3->434.70 MHz
- * (verified against real-CIU f01 and captures 20/21). The earlier "±1.7 MHz
- * wander" was pure SDR ALIASING (e.g. ch1 433.30 -> 435.35 at 434.4/2.048).
+ *   ch0->433.82  ch1->433.30  ch2->434.26  ch3->434.70 MHz.
+ * The earlier "±1.7 MHz wander" was pure SDR ALIASING (e.g. ch1 433.30 ->
+ * 435.35 at 434.4/2.048).
  *
  * IMPORTANT (low-IF receiver): the CMT2300A RX register sets the LO; the
  * received frequency is LO - IF, with IF ~= 280 kHz (= the spacing between every
@@ -399,7 +399,7 @@ static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
  * which down-converts the meter's TX-half reply; the TX-half is forced to
  * Ch0/433.82 (the probe frequency the meter wakes on). The advertised channel
  * and our RX channel MUST be the same index (handle_channel_select_).
- * ch2 (LO 434.54 -> receives 434.26) is the default — proven across 16/17/20/21.
+ * ch2 (LO 434.54 -> receives 434.26) is the default.
  */
 static constexpr uint8_t NARTIS_CUSTOM_CHANNELS[4][8] = {
     {0x42, 0x6D, 0x8F, 0x1C, 0x42, 0x57, 0xDD, 0x1B},  // CH0: RX LO 434.10 (recv 433.82) / TX 433.82
@@ -411,8 +411,8 @@ static constexpr uint8_t NARTIS_CUSTOM_CHANNELS[4][8] = {
 
 /* Runtime override values (applied after bank writes) */
 static constexpr uint8_t FIFO_MERGE_VALUE = 0x12;   // REG_SYS11: (reg & 0xE0) | 0x12 — merge TX+RX = 64B
-static constexpr uint8_t FIFO_TH_VALUE = 0x0F;      // REG_PKT29: (reg & 0xE0) | 0x0F — threshold = 15 bytes (firmware value)
-static constexpr uint8_t TX_REFILL_CHUNK = 15;       // Firmware refills 15 bytes per TX_FIFO_TH event (cmt_tx_chunked_write (0x131B8))
+static constexpr uint8_t FIFO_TH_VALUE = 0x0F;      // REG_PKT29: (reg & 0xE0) | 0x0F — threshold = 15 bytes
+static constexpr uint8_t TX_REFILL_CHUNK = 15;       // Refill 15 bytes per TX_FIFO_TH event
 
 /* Number of frequency channels */
 static constexpr uint8_t NUM_CHANNELS = 4;
@@ -426,11 +426,11 @@ static constexpr uint32_t STATE_POLL_TIMEOUT_MS = 10;
 static constexpr uint32_t STATE_POLL_INTERVAL_US = 100;
 
 /* ================================================================
- * Channel-scan constants — match firmware rssi_channel_select (0x000134A4)
+ * Channel-scan constants
  * 1 initial warmup sample + RSSI_SCAN_LOOP_SAMPLES scored samples per channel,
  * RSSI_SCAN_SAMPLE_DELAY_US between each read.
  * Score is the trimmed mean: (sum - max - min) / (LOOP_SAMPLES - 2).
- * Firmware does NOT use any RSSI threshold — it only ranks channels.
+ * No RSSI threshold is used — channels are only ranked.
  * ================================================================ */
 static constexpr uint8_t  RSSI_SCAN_LOOP_SAMPLES = 6;
 static constexpr uint32_t RSSI_SCAN_SAMPLE_DELAY_US = 2000;

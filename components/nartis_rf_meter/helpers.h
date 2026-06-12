@@ -1,14 +1,8 @@
 /*
  * Nartis RF Meter — Shared Types and Constants
  *
- * Frame structure verified end-to-end against:
- *   - 104 CIU→meter SPI-dumped frames (fifo.txt, Pair-B)
- *   - 104 meter→CIU SPI-dumped frames (Pair-B)
- *   - Ghidra decompile of rf_build_frame, rf_parse_frame, crc_block_insert,
- *     crc_block_deframe, rx_address_verify, derive_rf_address
- *
- * See FRAME_HEADER_SPEC.md in the firmware research repo for full layout
- * documentation including dual-CRC handling for frames > 128 bytes.
+ * Defines the on-wire frame layout, including dual-CRC handling for
+ * frames > 128 bytes.
  */
 
 #pragma once
@@ -20,7 +14,7 @@
 namespace esphome::nartis_rf_meter {
 
 /* ================================================================
- * RF Protocol Constants (from firmware template at 0x0000fdf4)
+ * RF Protocol Constants
  * ================================================================ */
 static constexpr uint16_t RF_DEVICE_ID = 0x2CCD;   // bytes "CD 2C" little-endian
 static constexpr uint8_t RF_GROUP_ID = 0x50;        // byte [8] of 8-byte address
@@ -80,7 +74,6 @@ struct RfAddress {
     out[7] = device_type;
   }
 
-  /// Deserialize from 8-byte on-wire buffer.
   static RfAddress from_bytes(const uint8_t in[8]) {
     RfAddress addr;
     addr.device_id = static_cast<uint16_t>(in[0]) | (static_cast<uint16_t>(in[1]) << 8);
@@ -101,7 +94,6 @@ struct RfAddress {
   }
 
   /// Derive RF address from a CIU serial string + version seed.
-  /// Matches firmware derive_rf_address (0xFAAC).
   ///
   /// Algorithm:
   ///   1. Take last 7 chars of serial
@@ -111,8 +103,8 @@ struct RfAddress {
   ///   5. Fixed device_id=0x2CCD, group_id=0x50, device_type=0x25
   ///
   /// Verified examples:
-  ///   "MPCUA00294W6" + seed 230 → CD 2C 00 01 26 E6 50 25  (Pair A)
-  ///   "MPCUA002RV634" + seed 107 → CD 2C 00 00 02 6B 50 25  (Pair B)
+  ///   "MPCUA00294W6" + seed 230 → CD 2C 00 01 26 E6 50 25
+  ///   "MPCUA002RV634" + seed 107 → CD 2C 00 00 02 6B 50 25
   static RfAddress derive(const char *ciu_serial, uint32_t seed) {
     RfAddress addr;
     addr.device_type = RF_DEVICE_TYPE_CIU;
@@ -142,8 +134,7 @@ struct RfAddress {
 /* ================================================================
  * RF Frame Types — outgoing (CIU→meter) header byte [1]
  *
- * Verified in fifo.txt (104 frames): only 0x44 and 0x08 observed.
- * The other modes are documented in firmware radio_set_mode.
+ * In the captured traffic only 0x44 and 0x08 were observed.
  * ================================================================ */
 enum class RfFrameType : uint8_t {
   BEACON = 0x08,       // Mode 3: wake/beacon (short encrypted frame)
@@ -180,8 +171,8 @@ static constexpr size_t RF_TX_ENC_CIPHER   = 21;  // L bytes of ciphertext
  * RF Frame Header Offsets — INCOMING (meter → CIU)
  *
  * Address [2..9] is the meter's own address (device_type = 0x02).
- * Mode flags at [11]/[12] BOTH zero ⇒ plain branch (firmware parser logic).
- * For our observed dataset all RX frames are plain at the transport layer;
+ * Mode flags at [11]/[12] BOTH zero ⇒ plain branch.
+ * In the captured traffic all RX frames are plain at the transport layer;
  * RX type 0x43 plain payloads carry a NESTED encrypted frame inside.
  * ================================================================ */
 static constexpr size_t RF_RX_LENGTH       =  0;
@@ -195,7 +186,7 @@ static constexpr size_t RF_RX_PAYLOAD      = 13;  // plain payload start
 // In plain frames, CRC(s) follow payload (single or dual based on total length)
 
 /* ================================================================
- * Dual-CRC threshold (from crc_block_insert @ 0xB9B2)
+ * Dual-CRC threshold
  *
  * Pre-CRC body size > 126 ⇒ insert CRC1 at offset 0x7E, CRC2 at end.
  * Equivalently: final on-air frame size > 128 ⇒ dual CRC.

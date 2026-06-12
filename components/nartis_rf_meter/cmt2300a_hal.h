@@ -23,7 +23,7 @@
  *
  *   We poll the physical pin rather than the SPI FIFO-flag register (0x6E):
  *   that register reads 0xFF here (Control2 bank), so it is unusable — matching
- *   the original CIU firmware, which also reads the chip's INT pin via MCU GPIO.
+ *   the stock CIU, which also reads the chip's INT pin via MCU GPIO.
  */
 
 #pragma once
@@ -53,8 +53,6 @@ class Cmt2300aHal {
   /// Check if the chip is responding (read product ID register).
   bool is_chip_connected();
 
-  /* ---- State Control ---- */
-
   /// Transition to Standby mode. Returns true if state reached within timeout.
   bool go_standby();
 
@@ -73,8 +71,6 @@ class Cmt2300aHal {
   /// Wait for a specific state with timeout. Returns true if reached.
   bool wait_for_state(uint8_t target_state, uint32_t timeout_ms = STATE_POLL_TIMEOUT_MS);
 
-  /* ---- Frequency Channel ---- */
-
   /// Switch frequency registers to channel 0-3 (full TX+RX bank).
   void set_frequency_channel(uint8_t ch);
 
@@ -84,18 +80,13 @@ class Cmt2300aHal {
   void set_rx_channel(uint8_t ch);
 
   /// Select which channel table set_frequency_channel() reads from:
-  /// false (default) = firmware NARTIS_FREQ_CHANNELS; true = NARTIS_CUSTOM_CHANNELS.
+  /// false (default) = standard NARTIS_FREQ_CHANNELS; true = NARTIS_CUSTOM_CHANNELS.
   void set_use_custom_channels(bool enable) { use_custom_channels_ = enable; }
 
-  /* ---- FIFO Operations ---- */
-
-  /// Clear both TX and RX FIFO.
   void clear_fifo();
 
-  /// Clear TX FIFO only.
   void clear_tx_fifo();
 
-  /// Clear RX FIFO only.
   void clear_rx_fifo();
 
   /// Full merged-FIFO reset for RX: FIFO_RESTORE + clear RX/TX. Use after a
@@ -106,8 +97,8 @@ class Cmt2300aHal {
   size_t write_fifo(const uint8_t *data, size_t len);
 
   /// Set per-TX payload length (PKT14 high bits + PKT15 low byte).
-  /// Firmware writes this before every TX: bank leaves chip in fixed-length mode
-  /// with PKT15=0xFF (511 bytes), so TX_DONE never fires for shorter packets.
+  /// Must be written before every TX: the bank leaves the chip in fixed-length
+  /// mode with PKT15=0xFF (511 bytes), so TX_DONE never fires for shorter packets.
   void set_tx_payload_length(uint16_t len);
 
   /// Restore PAYLOAD_LENG to the large bank default (511) before RX.
@@ -123,12 +114,8 @@ class Cmt2300aHal {
   /// Handles packets up to MAX_RF_FRAME_SIZE bytes.
   bool transmit_chunked(const uint8_t *data, size_t len);
 
-  /// Read data from RX FIFO.
   size_t read_fifo(uint8_t *data, size_t max_len);
 
-  /* ---- Interrupt & Status ---- */
-
-  /// Read INT_FLAG register (0x6D).
   uint8_t get_interrupt_flags();
 
   /// Read INT_CLR1 register (0x6A) for TX_DONE flag.
@@ -154,11 +141,11 @@ class Cmt2300aHal {
   void set_rssi_mode(bool enable);
 
   /// Scan all NUM_CHANNELS channels, return the channel index with the lowest
-  /// trimmed-mean RSSI. Exact replica of CIU firmware rssi_channel_select (0x000134A4):
+  /// trimmed-mean RSSI. Picks the quietest channel:
   ///   per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,
   ///                then 6 more samples with 2 ms between each,
   ///                score = (sum_of_6 - max - min) / 4  (trimmed mean of middle 4).
-  /// Note: firmware never selects channel 0 (off-by-one bug: ch0's score is computed
+  /// Note: channel 0 is never selected (off-by-one quirk: ch0's score is computed
   /// but never compared). This impl preserves that behavior so the meter's expectations
   /// match — channels 1, 2, 3 are eligible; the device returns 1 if none is better.
   /// If out_score is non-null, must point to at least NUM_CHANNELS int8_t and is
@@ -184,8 +171,6 @@ class Cmt2300aHal {
   /// RX_FIFO_TH during RX).
   void set_int_source(uint8_t source);
 
-  /* ---- Chunked RX (polling-based, no ISR) ---- */
-
   /// Prepare the SDIO pin + FIFO control for an RX session. Call once
   /// after entering RX mode, before the first poll_rx_drain() call.
   void prepare_rx_session();
@@ -201,23 +186,16 @@ class Cmt2300aHal {
   /// FIFO is empty).
   size_t poll_rx_drain(uint8_t *buf, size_t buf_size);
 
-  /* ---- Low-Level Register Access ---- */
-
-  /// Write a single register.
   void write_reg(uint8_t addr, uint8_t val);
 
-  /// Read a single register.
   uint8_t read_reg(uint8_t addr);
 
-  /// Write a bank of consecutive registers.
   void write_bank(uint8_t start_addr, const uint8_t *data, size_t len);
 
   /// Read-modify-write: (reg & ~mask) | (val & mask).
   void update_reg(uint8_t addr, uint8_t mask, uint8_t val);
 
  private:
-  /* ---- Bit-bang SPI primitives ---- */
-
   /// Send 8 bits on SDIO (MSB first), SDIO configured as output.
   void spi_send_byte(uint8_t byte);
 
@@ -255,7 +233,6 @@ class Cmt2300aHal {
   /// Apply runtime overrides (FIFO merge, FIFO threshold, GPIO/interrupt config).
   void apply_runtime_overrides();
 
-  /* ---- Pin assignments ---- */
   // Configured GPIO pin objects (used for setup() + pin_mode at init).
   esphome::InternalGPIOPin *sdio_pin_{nullptr};
   esphome::InternalGPIOPin *sclk_pin_{nullptr};
@@ -270,7 +247,7 @@ class Cmt2300aHal {
   esphome::ISRInternalGPIOPin gpio3_;
 
   bool initialized_{false};
-  bool use_custom_channels_{false};  // false = firmware presets, true = NARTIS_CUSTOM_CHANNELS
+  bool use_custom_channels_{false};  // false = default presets, true = NARTIS_CUSTOM_CHANNELS
 };
 
 }  // namespace esphome::nartis_rf_meter

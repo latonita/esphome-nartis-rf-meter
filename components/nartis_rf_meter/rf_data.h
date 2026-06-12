@@ -3,8 +3,7 @@
  *
  * Layer 2: Packet framing, CRC-16/DNP, AES-128-GCM, channel management.
  *
- * Structure (matches firmware rf_build_frame @ 0xBB88 and rf_parse_frame
- * @ 0xBF5E, verified against 208 SPI-extracted frames from Pair-B):
+ * Frame structure:
  *
  *   TX (CIU→meter) layout:
  *     [0]     length-1
@@ -48,8 +47,6 @@ class RfDataLayer {
  public:
   RfDataLayer() = default;
 
-  /* ---- Configuration ---- */
-
   /// Set the local (CIU) 8-byte RF address used for TX address field
   /// AND for the AES-GCM nonce prefix.
   void set_address(const RfAddress &addr);
@@ -61,13 +58,12 @@ class RfDataLayer {
 
   /// Set AES-128 key (16 bytes), e.g. "ZCZfuT666iRdgPNH"
   void set_aes_key(const uint8_t key[AES_KEY_SIZE]);
-  /// Read back the active AES-128 data key (16 bytes).
   void get_aes_key(uint8_t key[AES_KEY_SIZE]) const { memcpy(key, aes_key_, AES_KEY_SIZE); }
 
   /// Extract the 16-byte data key the meter delivers inside a 0x53
   /// SESSION_SETUP key-install blob. The blob is GCM-encrypted with the
   /// factory default key (0x22 x16); the nonce is perm(CIU address) + the
-  /// blob's inner counter (firmware key_install_verify @0x12DF0). The
+  /// blob's inner counter. The
   /// plaintext is [slot][len=0x10][16-byte key = ASCII(meter_SN)[12] +
   /// meter-assigned 4-byte suffix]. Returns true and fills `out_key` on a
   /// well-formed blob (len byte == 0x10). CTR is symmetric so no separate
@@ -76,14 +72,12 @@ class RfDataLayer {
 
   /// Set the channel index (0..3) and a representative RSSI (dBm) for
   /// outgoing frames' channel_byte at [12]. RSSI is mapped via the
-  /// firmware formula `quality = clamp((rssi+130)/2, 1, 62)`.
+  /// formula `quality = clamp((rssi+130)/2, 1, 62)`.
   void set_channel_quality(uint8_t channel_idx, int8_t rssi_dbm) {
     current_channel_ = channel_idx & 0x3;
     last_rssi_dbm_   = rssi_dbm;
   }
   uint8_t get_channel() const { return current_channel_; }
-
-  /* ---- TX Path ---- */
 
   /// Build a complete on-air RF frame.
   ///   `payload` / `payload_len`: plaintext DLMS payload.
@@ -104,18 +98,16 @@ class RfDataLayer {
     return build_frame(out, out_max, type, sequence, payload, payload_len);
   }
 
-  /* ---- RX Path ---- */
-
-  /// Result codes mirroring firmware parser return values + replay reject.
+  /// Result codes mirroring the meter parser's return values + replay reject.
   enum class ParseResult : int {
     OK              =  0,
     ERR_LEN         = -1,
     ERR_CRC         = -2,
     ERR_ADDR        = -3,
     ERR_MIC         = -4,
-    ERR_MUSTBEZERO  = -5,  // matches firmware return 6
-    ERR_LEN_MATH    = -6,  // matches firmware return 4 (length math)
-    ERR_REPLAY      = -7,  // counter rewound (firmware return 9)
+    ERR_MUSTBEZERO  = -5,  // matches the meter's return code 6
+    ERR_LEN_MATH    = -6,  // matches the meter's return code 4 (length math)
+    ERR_REPLAY      = -7,  // counter rewound (the meter's return code 9)
   };
 
   /// Parse a received RF frame, extracting payload.
@@ -149,15 +141,11 @@ class RfDataLayer {
   int peek_nested_plain(const uint8_t *payload, size_t payload_len,
                         uint8_t *plain_out, size_t plain_max) const;
 
-  /* ---- Channel Management ---- */
-
   /// Select the quietest channel (1..3) from 4 RSSI readings.
-  /// Channel 0 is scanned but never selected by firmware.
+  /// Channel 0 is scanned but never selected by the meter.
   static uint8_t select_best_channel(const int8_t rssi[4]);
 
   void set_channel(uint8_t ch) { current_channel_ = ch & 0x3; }
-
-  /* ---- Frame Counter ---- */
 
   /// TX-side counter (used in the AES-GCM nonce; auto-incremented per encrypted TX).
   uint32_t get_frame_counter() const { return frame_counter_; }
@@ -167,11 +155,11 @@ class RfDataLayer {
   void increment_frame_counter() { frame_counter_++; }
 
   /// RX-side replay-protection counter (highest counter ever accepted in an
-  /// encrypted RX frame). Matches firmware ctx[+8] in aes_counter_mgr.
+  /// encrypted RX frame).
   /// MUST be persisted to NVS across reboots.
   uint32_t get_last_rx_counter() const { return last_rx_counter_; }
   void set_last_rx_counter(uint32_t v) { last_rx_counter_ = v; }
-  /// Reset replay-counter state (firmware does this for frame[6]==0x80
+  /// Reset replay-counter state (the meter does this for frame[6]==0x80
   /// session-reset messages). Use sparingly.
   void reset_rx_counter() { last_rx_counter_ = 0; }
 
@@ -180,8 +168,6 @@ class RfDataLayer {
   uint32_t get_last_nested_rx_counter() const { return last_nested_rx_counter_; }
   void set_last_nested_rx_counter(uint32_t v) { last_nested_rx_counter_ = v; }
 
-  /* ---- CRC-16/DNP (public for testing) ---- */
-
   /// Compute CRC-16/DNP over a byte buffer.
   /// Polynomial 0x3D65, init 0x0000, no reflection, xorout 0xFFFF.
   static uint16_t crc16_calc(const uint8_t *data, size_t len);
@@ -189,12 +175,10 @@ class RfDataLayer {
   /// Verify CRC: compute over data[0..len-3], compare with BE u16 at [len-2..len-1].
   static bool crc16_verify(const uint8_t *data, size_t len);
 
-  /// Compute channel_byte from channel index and RSSI (firmware formula).
+  /// Compute channel_byte from channel index and RSSI.
   static uint8_t compose_channel_byte(uint8_t channel_idx, int8_t rssi_dbm);
 
  private:
-  /* ---- CRC insertion / stripping ---- */
-
   /// Insert CRC(s) on the buffer in-place; returns final size.
   /// Single CRC if `body_size + 2 <= CRC_DUAL_THRESHOLD`, else dual CRC
   /// (CRC1 at offset 0x7E, body bytes [0x7E..body_size-1] shifted right
@@ -204,8 +188,6 @@ class RfDataLayer {
   /// Verify and strip CRC(s) on the buffer in-place; returns final body size,
   /// or -1 on CRC error.
   static int crc_strip(uint8_t *buf, size_t frame_size);
-
-  /* ---- AES-128-GCM ---- */
 
   /// Encrypt payload in-place, appending 12-byte tag. AAD = [01 29 len 00].
   /// Returns new length.
@@ -217,18 +199,16 @@ class RfDataLayer {
   /// Build 12-byte nonce: permuted 8-byte CIU address + 4-byte counter (BE).
   void build_nonce(uint8_t nonce[AES_NONCE_SIZE], const RfAddress &addr, uint32_t counter) const;
 
-  /* ---- CRC Lookup Table ---- */
   static const uint16_t crc_table_[256];
 
-  /* ---- State ---- */
-  RfAddress address_{};        // CIU's own address
-  RfAddress meter_address_{};  // expected meter address (RX filter)
+  RfAddress address_{};
+  RfAddress meter_address_{};
   bool meter_address_set_{false};
   uint8_t aes_key_[AES_KEY_SIZE]{};
   uint32_t frame_counter_{0};
   uint32_t last_rx_counter_{0};
   uint32_t last_nested_rx_counter_{0};
-  // Firmware rf_prepare_and_queue tracks last-sent sequence so the AES counter
+  // The meter tracks last-sent sequence so the AES counter
   // is bumped only when the sequence byte changes — beacons retransmitted with
   // identical content reuse the previous counter.
   uint8_t  last_tx_sequence_{0};

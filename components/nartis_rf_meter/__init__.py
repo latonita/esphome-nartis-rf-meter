@@ -55,7 +55,6 @@ def validate_ciu_address(value):
 CONFIG_SCHEMA = cv.Schema(
     {
             cv.GenerateID(): cv.declare_id(NartisRfMeterComponent),
-            # CMT2300A bit-bang SPI pins
             cv.Required(CONF_PIN_SDIO): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_SCLK): pins.internal_gpio_output_pin_schema,
             cv.Required(CONF_PIN_CSB): pins.internal_gpio_output_pin_schema,
@@ -68,7 +67,7 @@ CONFIG_SCHEMA = cv.Schema(
 
             # Use the non-standard ("invented") frequency presets placed on the
             # meter's observed reply frequencies (RX 434.30/433.70/434.00/434.55,
-            # TX held at 433.82) instead of the firmware channel grid. The firmware
+            # TX held at 433.82) instead of the default channel grid. The default
             # RX presets are 97..278 kHz off where this meter actually replies and
             # miss it; these centres + 100 kHz BW + AFC capture it. Default: off.
             cv.Optional(CONF_USE_NON_STANDARD_CHANNELS, default=False): cv.boolean,
@@ -106,7 +105,6 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
-    # Pins
     sdio = await cg.gpio_pin_expression(config[CONF_PIN_SDIO])
     cg.add(var.set_pin_sdio(sdio))
     sclk = await cg.gpio_pin_expression(config[CONF_PIN_SCLK])
