@@ -192,3 +192,11 @@ text_sensor:
     name: "Current Tariff"       # Текущий тариф
     obis_code: "0.0.96.14.0.255"
     icon: mdi:counter
+
+# Re-pair button — press in Home Assistant to drop the saved session and pair
+# again (use if communication gets stuck). Waits for the current cycle to finish,
+# so it never breaks an active read.
+button:
+  - platform: nartis_rf_meter
+    name: "Re-pair"              # Повторное сопряжение
+

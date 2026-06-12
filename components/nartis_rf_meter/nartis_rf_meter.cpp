@@ -248,8 +248,22 @@ void NartisRfMeterComponent::update() {
   start_cycle_();
 }
 
+void NartisRfMeterComponent::request_repair() {
+  ESP_LOGI(TAG, "Re-pair requested — will drop the session and re-pair after the "
+                "current cycle finishes.");
+  repair_requested_ = true;
+}
+
 void NartisRfMeterComponent::loop() {
   if (state_ == State::NOT_INITIALIZED || state_ == State::IDLE) {
+    // Honor a pending manual re-pair only while idle, so it never interrupts an
+    // in-flight read/pairing cycle.
+    if (state_ == State::IDLE && repair_requested_) {
+      repair_requested_ = false;
+      ESP_LOGW(TAG, "Re-pairing now — dropping the saved session and starting a fresh handshake.");
+      reset_pairing_state_();
+      start_cycle_();
+    }
     return;
   }
   handle_state_();
@@ -1436,7 +1450,7 @@ void NartisRfMeterComponent::handle_publish_() {
 
   hal_.go_sleep();
   set_state_(State::IDLE);
-  ESP_LOGI(TAG, "Read cycle complete");
+  ESP_LOGI(TAG, "Read cycle complete (%.1f s)", session_ms / 1000.0f);
 }
 
 void NartisRfMeterComponent::handle_error_recovery_() {

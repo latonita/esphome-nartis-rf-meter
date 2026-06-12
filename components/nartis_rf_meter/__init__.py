@@ -6,7 +6,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@latonita"]
-AUTO_LOAD = ["sensor", "text_sensor"]
+AUTO_LOAD = ["sensor", "text_sensor", "button"]
 MULTI_CONF = True
 
 CONF_PIN_SDIO = "pin_sdio"

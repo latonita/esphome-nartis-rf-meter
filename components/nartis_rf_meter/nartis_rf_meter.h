@@ -17,6 +17,7 @@
 #include "esphome/core/preferences.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/button/button.h"
 
 #include "cmt2300a_hal.h"
 #include "rf_data.h"
@@ -115,6 +116,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
                        uint16_t class_id, uint8_t attr_id);
   void register_text_sensor(esphome::text_sensor::TextSensor *s, const ObisCode &obis,
                             uint16_t class_id, uint8_t attr_id);
+
+  /// Request a fresh pairing handshake from outside (e.g. a Home Assistant
+  /// button). Safe at any time: the in-flight cycle is allowed to finish, then
+  /// the saved session is dropped and re-pairing starts on the next idle loop —
+  /// it never interrupts active communication.
+  void request_repair();
 
   // State machine (public for logging helper).
   enum class State : uint8_t {
@@ -366,6 +373,9 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // Reset to 0 by a cycle that reaches PUBLISH.
   uint8_t consecutive_read_failures_{0};
   static constexpr uint8_t MAX_READ_FAILURES_BEFORE_REPAIR_ = 10;
+  // Set by request_repair() (e.g. a HA button); consumed only when IDLE in
+  // loop() so a press never interrupts an in-flight cycle.
+  bool repair_requested_{false};
 
   esphome::ESPPreferenceObject pref_;
   // Bump when NvsPairingState layout/semantics change — a mismatch makes
@@ -430,6 +440,20 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   static constexpr uint32_t RX_DRAIN_STALL_MS_ = 100;
 
   std::vector<SensorEntry> sensors_;
+};
+
+/// Momentary button entity that asks the hub to re-pair. Defers to the hub's
+/// request_repair(), which drops the session and re-pairs once idle.
+class NartisRepairButton : public esphome::button::Button {
+ public:
+  void set_parent(NartisRfMeterComponent *parent) { parent_ = parent; }
+
+ protected:
+  void press_action() override {
+    if (parent_ != nullptr)
+      parent_->request_repair();
+  }
+  NartisRfMeterComponent *parent_{nullptr};
 };
 
 }  // namespace esphome::nartis_rf_meter
