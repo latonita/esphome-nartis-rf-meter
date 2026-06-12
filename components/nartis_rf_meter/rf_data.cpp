@@ -437,12 +437,12 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
   // Mode 6 (PLAIN_DATA): plain on secondary channel.
   // Mode 2 (ACK) + Mode 3 (BEACON): RF AES-GCM.
   const bool encrypted   = (type == RfFrameType::ACK || type == RfFrameType::BEACON);
-  const uint8_t marker   = (type == RfFrameType::PLAIN_DATA) ? MODE_MARKER_SPECIAL : MODE_MARKER_NORMAL;
+  const uint8_t ci_field = (type == RfFrameType::PLAIN_DATA) ? CI_FIELD_SPECIAL : CI_FIELD_NORMAL;
 
   out[RF_TX_LENGTH]       = 0;  // filled at the end
   out[RF_TX_FLAGS]        = static_cast<uint8_t>(type);
   address_.to_bytes(out + RF_TX_ADDR);
-  out[RF_TX_MODE_MARKER]  = marker;
+  out[RF_TX_CI_FIELD]  = ci_field;
   out[RF_TX_SEQUENCE]     = sequence;
   out[RF_TX_CHANNEL_BYTE] = compose_channel_byte(current_channel_, last_rssi_dbm_);
   out[RF_TX_ENC_FLAG]     = encrypted ? 0x01 : 0x00;
@@ -548,8 +548,8 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
     RfAddress src = RfAddress::from_bytes(work + RF_RX_ADDR);
     if (!(src == meter_address_)) {
       ESP_LOGD(TAG, "RX address mismatch — discarding (got %02X%02X / hash %08X, type %02X)",
-               src.device_id & 0xFF, (src.device_id >> 8) & 0xFF,
-               static_cast<unsigned>(src.serial_hash), src.device_type);
+               src.manufacturer_id & 0xFF, (src.manufacturer_id >> 8) & 0xFF,
+               static_cast<unsigned>(src.address_id), src.device_type);
       return static_cast<int>(ParseResult::ERR_ADDR);
     }
   }
@@ -568,9 +568,9 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
   // to the application layer which deals
   // with the nesting.
   const uint8_t frame_type = work[RF_RX_TYPE];
-  const bool is_plain = (frame_type == 0x06 || frame_type == 0x40 ||
-                         frame_type == 0x43 || frame_type == 0x53 ||
-                         frame_type == 0x5B);
+  const bool is_plain = (frame_type == RX_TYPE_PRESENCE_ACK || frame_type == RX_TYPE_SHORT_ACK ||
+                         frame_type == RX_TYPE_DATA || frame_type == RX_TYPE_SESSION_SETUP ||
+                         frame_type == RX_TYPE_REQUEST_ACK);
 
   if (is_plain) {
     if (body_size <= static_cast<int>(RF_RX_PAYLOAD)) return 0;  // no payload
@@ -632,7 +632,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
  * Nested encrypted frame (inside RX 0x43 plain payload)
  *
  * Layout (verified on all observed RX 0x43 frames):
- *   [0..1]   2 bytes prefix (last 2 bytes of CIU serial_hash typically)
+ *   [0..1]   2 bytes prefix (last 2 bytes of CIU address_id typically)
  *   [2..3]   CD 2C
  *   [4..5]   50 25 (CIU's group/type)
  *   [6..7]   sub-sequence (02 1A / 02 18 / 02 19 ...)

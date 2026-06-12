@@ -209,9 +209,9 @@ void NartisRfMeterComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Pins: SDIO=%d, SCLK=%d, CSB=%d, FCSB=%d, GPIO3=%d",
                 pin_sdio_->get_pin(), pin_sclk_->get_pin(), pin_csb_->get_pin(),
                 pin_fcsb_->get_pin(), pin_gpio3_->get_pin());
-  ESP_LOGCONFIG(TAG, "  Address: device_id=0x%04X, serial_hash=0x%08X, group=%d, type=%d",
-                address_.device_id, (unsigned) address_.serial_hash,
-                address_.group_id, address_.device_type);
+  ESP_LOGCONFIG(TAG, "  Address: manufacturer_id=0x%04X, address_id=0x%08X, version=%d, type=%d",
+                address_.manufacturer_id, (unsigned) address_.address_id,
+                address_.version, address_.device_type);
   ESP_LOGCONFIG(TAG, "  DLMS: client=%d, server=%d", CLIENT_ADDRESS_, SERVER_ADDRESS_);
   if (fix_channel_ >= 0) {
     ESP_LOGCONFIG(TAG, "  Channel: fixed %d (RSSI auto-scan disabled)", fix_channel_);
@@ -395,7 +395,7 @@ void NartisRfMeterComponent::handle_state_() {
         // routing decision only needs the type byte; we don't read the payload.
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
-        if (t == 0x06 && n >= 0) {
+        if (t == RX_TYPE_PRESENCE_ACK && n >= 0) {
           // Clean frame — safe to capture the meter address.
           ESP_LOGI(TAG, "Pairing: meter answered probe (0x06)");
           lock_channel_();  // meter replied on active_channel_ — pin it for the session
@@ -403,7 +403,7 @@ void NartisRfMeterComponent::handle_state_() {
           pair_retry_ = 0;  // reset for the ACK phase
           rx_parse_retries_ = 0;
           set_state_(State::PAIR_ACK_TX);
-        } else if (t == 0x06 && n < 0 &&
+        } else if (t == RX_TYPE_PRESENCE_ACK && n < 0 &&
                    rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
                    esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
           // CRC fail with matching type byte — the address bytes could be
@@ -453,7 +453,7 @@ void NartisRfMeterComponent::handle_state_() {
         // side; sending mode-6 anyway closes the handshake cleanly).
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
-        if (t == 0x53) {
+        if (t == RX_TYPE_SESSION_SETUP) {
           // SESSION_SETUP — the meter ships the per-pairing data key it assigns
           // this CIU, GCM-encrypted under the factory default key (0x22 x16). 
           // We MUST extract it: the meter encrypts/decrypts all subsequent 
@@ -492,7 +492,7 @@ void NartisRfMeterComponent::handle_state_() {
           rf_.set_last_nested_rx_counter(0);
           rx_parse_retries_ = 0;
           set_state_(State::PAIR_MODE6_TX);
-        } else if (t == 0x5B || t == 0x40) {
+        } else if (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK) {
           // Some meters skip straight to keepalive/ack — treat as paired.
           ESP_LOGI(TAG, "Pairing: meter ready (0x%02X) — paired", t);
           paired_ = true;
@@ -531,7 +531,7 @@ void NartisRfMeterComponent::handle_state_() {
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
         // Expected: 0x5B keepalive. Accept type-byte match even on CRC fail.
         // (0x40 short-ack also acceptable — some meters skip keepalive after mode-6.)
-        if (t == 0x5B || t == 0x40) {
+        if (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK) {
           ESP_LOGI(TAG, "Pairing complete (meter replied 0x%02X). Now paired.", t);
           paired_ = true;
           rx_parse_retries_ = 0;
@@ -577,7 +577,7 @@ void NartisRfMeterComponent::handle_state_() {
         // (noisy RX corrupts the trailing CRC bytes but the type byte is usually
         // intact). On other type bytes, retry within the wait window before
         // giving up.
-        if (t == 0x40) {
+        if (t == RX_TYPE_SHORT_ACK) {
           lock_channel_();  // first contact in an already-paired session — pin the channel
           if (payload_len < 0) {
             ESP_LOGW(TAG, "Beacon response: 0x40 with parse fail (n=%d) — accepting", payload_len);
@@ -653,11 +653,11 @@ void NartisRfMeterComponent::handle_state_() {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
-        if (raw_type == 0x5B) {
+        if (raw_type == RX_TYPE_REQUEST_ACK) {
           ESP_LOGV(TAG, "GET cycle: meter ack'd request (0x5B), requesting data via BEACON");
           retry_count_ = 0;
           set_state_(State::READ_POLL_BEACON_TX);
-        } else if (raw_type == 0x43) {
+        } else if (raw_type == RX_TYPE_DATA) {
           // Meter answered the GET directly with data (no keepalive/beacon round-trip
           // needed) — matches genuine captures.
           ESP_LOGV(TAG, "GET cycle: meter answered GET directly with data (0x43)");
@@ -710,7 +710,7 @@ void NartisRfMeterComponent::handle_state_() {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
-        if (raw_type == 0x43) {
+        if (raw_type == RX_TYPE_DATA) {
           handle_data_response_();
         } else {
           ESP_LOGW(TAG, "GET cycle: unexpected data response (type=0x%02X) — retrying req-beacon",
@@ -1266,7 +1266,7 @@ bool NartisRfMeterComponent::handle_get_response_() {
   size_t dlms_len = static_cast<size_t>(payload_len);
   uint8_t *const dlms_buf = rx_dlms_buf_;
   const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
-  if (raw_type == 0x43) {
+  if (raw_type == RX_TYPE_DATA) {
     int n = rf_.parse_nested_encrypted(payload, static_cast<size_t>(payload_len),
                                        dlms_buf, sizeof(rx_dlms_buf_));
     if (n == static_cast<int>(RfDataLayer::ParseResult::ERR_REPLAY)) {
@@ -1510,7 +1510,7 @@ void NartisRfMeterComponent::derive_rf_address_() {
   }
 
   ESP_LOGI(TAG, "RF address derived: hash=0x%08X (ciu_serial=%s)",
-           (unsigned) address_.serial_hash,
+           (unsigned) address_.address_id,
            ciu_serial_.empty() ? "<from MAC>" : ciu_serial_.c_str());
 }
 
@@ -1710,11 +1710,11 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
       if (peek_len > 0) {
         ESP_LOGV(TAG, "RX decoded (type=0x%02X, %d B plain%s): %s",
                  raw_type, peek_len,
-                 (raw_type == 0x43 || raw_type == 0x53) ? " — nested-decrypted" : "",
+                 (raw_type == RX_TYPE_DATA || raw_type == RX_TYPE_SESSION_SETUP) ? " — nested-decrypted" : "",
                  format_hex_pretty(peek_buf, peek_len).c_str());
         // Third line: for 0x43 the outer payload still wraps a nested-encrypted
         // DLMS APDU — decrypt it (non-mutating peek) and dump the inner plaintext.
-        if (raw_type == 0x43) {
+        if (raw_type == RX_TYPE_DATA) {
           uint8_t *const dlms_buf = rx_dlms_buf_;
           int dlms_len = rf_.peek_nested_plain(peek_buf, peek_len, dlms_buf, sizeof(rx_dlms_buf_));
           if (dlms_len > 0) {

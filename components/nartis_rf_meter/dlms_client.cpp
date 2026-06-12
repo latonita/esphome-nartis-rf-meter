@@ -16,6 +16,13 @@ namespace esphome::nartis_rf_meter {
 
 static const char *const TAG = "dlms_client";
 
+// get-response framing bytes (meter→CIU).
+static constexpr uint8_t DLMS_GET_RESPONSE   = 0xC4;  // get-response tag (request tag is 0xC0)
+static constexpr uint8_t DLMS_RESP_WITH_LIST = 0x03;  // response type: with-list
+static constexpr uint8_t DLMS_RESP_NORMAL    = 0x01;  // response type: normal
+static constexpr uint8_t DLMS_RESULT_DATA    = 0x00;  // per-entry result: data follows
+static constexpr uint8_t DLMS_RESULT_ERROR   = 0x01;  // per-entry result: access-error byte
+
 /* ---- Big-endian byte readers (COSEM values are big-endian on the wire) ---- */
 static inline uint16_t be16(const uint8_t *p) {
   return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
@@ -278,7 +285,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
     ESP_LOGW(TAG, "list response: too short for DLMS header");
     return false;
   }
-  if (data[pos] != 0xC4) {
+  if (data[pos] != DLMS_GET_RESPONSE) {
     ESP_LOGW(TAG, "list response: tag != 0xC4 (got 0x%02X)", data[pos]);
     return false;
   }
@@ -292,7 +299,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
   // batch slot (e.g. Voltage) — the bogus 5.4e17 V reading. Reject anything
   // that isn't a with-list response so the caller re-sends the request and
   // gets the real C4 03 answer.
-  if (data[pos + 1] != 0x03) {
+  if (data[pos + 1] != DLMS_RESP_WITH_LIST) {
     ESP_LOGW(TAG, "list response: not get-response-with-list (got 0x%02X 0x%02X) — "
                   "ignoring stale/mismatched response", data[pos], data[pos + 1]);
     return false;
@@ -309,7 +316,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
       break;
     }
     uint8_t result_tag = data[pos++];
-    if (result_tag == 1) {
+    if (result_tag == DLMS_RESULT_ERROR) {
       // data-access-result: 1 error byte
       if (pos >= len) break;
       uint8_t err = data[pos++];
@@ -320,7 +327,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
       }
       continue;
     }
-    if (result_tag != 0) {
+    if (result_tag != DLMS_RESULT_DATA) {
       ESP_LOGW(TAG, "  [%d] unknown result tag 0x%02X", i, result_tag);
       break;
     }

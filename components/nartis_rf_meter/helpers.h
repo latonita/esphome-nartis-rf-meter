@@ -16,16 +16,16 @@ namespace esphome::nartis_rf_meter {
 /* ================================================================
  * RF Protocol Constants
  * ================================================================ */
-static constexpr uint16_t RF_DEVICE_ID = 0x2CCD;   // bytes "CD 2C" little-endian
-static constexpr uint8_t RF_GROUP_ID = 0x50;        // byte [8] of 8-byte address
+static constexpr uint16_t RF_MANUFACTURER_ID = 0x2CCD;   // bytes "CD 2C" little-endian
+static constexpr uint8_t RF_VERSION = 0x50;        // byte [8] of 8-byte address
 static constexpr uint8_t RF_DEVICE_TYPE_CIU = 0x25; // byte [9] of CIU address
 static constexpr uint8_t RF_DEVICE_TYPE_METER = 0x02; // byte [9] of meter address
 
 /* ================================================================
- * Mode markers and AES-GCM security flag
+ * CI-field markers and AES-GCM security flag
  * ================================================================ */
-static constexpr uint8_t MODE_MARKER_NORMAL = 0x7A;   // header[10] for Mode 1/2/3 (TX)
-static constexpr uint8_t MODE_MARKER_SPECIAL = 0x8A;  // header[10] for Mode 6 (TX)
+static constexpr uint8_t CI_FIELD_NORMAL = 0x7A;   // header[10] for Mode 1/2/3 (TX)
+static constexpr uint8_t CI_FIELD_SPECIAL = 0x8A;  // header[10] for Mode 6 (TX)
 static constexpr uint8_t AES_GCM_FLAG = 0x29;         // fixed security/AAD header byte (AAD = 01 29 len 00)
 
 /* ================================================================
@@ -46,50 +46,50 @@ static constexpr uint16_t CRC16_XOROUT = 0xFFFF;
  * RF Address — 8-byte session identifier
  *
  * Per-device, derived from serial:
- *   [0..1] device_id_prefix  = 0x2CCD constant (bytes CD 2C on wire)
+ *   [0..1] manufacturer_id_prefix  = 0x2CCD constant (bytes CD 2C on wire)
  *   [2..4] serial_digits     = strtoul(serial[-7:], 10) as 3 bytes BE
  *   [5]    version_seed      = some byte derived per device
- *   [6]    group_id          = 0x50 constant
+ *   [6]    version          = 0x50 constant
  *   [7]    device_type       = 0x25 CIU | 0x02 meter
  *
  * The CIU has device_type=0x25; meter responses carry meter's address
  * with device_type=0x02.
  * ================================================================ */
 struct RfAddress {
-  uint16_t device_id{RF_DEVICE_ID};
-  uint32_t serial_hash{0};  // [2..5]: 3 BE digit bytes + 1 seed byte, packed LE into u32
-  uint8_t group_id{RF_GROUP_ID};
+  uint16_t manufacturer_id{RF_MANUFACTURER_ID};
+  uint32_t address_id{0};  // [2..5]: 3 BE digit bytes + 1 seed byte, packed LE into u32
+  uint8_t version{RF_VERSION};
   uint8_t device_type{RF_DEVICE_TYPE_CIU};
 
   /// Serialize to 8-byte on-wire buffer.
-  /// Layout: [device_id_lo, device_id_hi, hash[0..3], group_id, device_type]
+  /// Layout: [manufacturer_id_lo, manufacturer_id_hi, hash[0..3], version, device_type]
   void to_bytes(uint8_t out[8]) const {
-    out[0] = static_cast<uint8_t>(device_id & 0xFF);
-    out[1] = static_cast<uint8_t>((device_id >> 8) & 0xFF);
-    out[2] = static_cast<uint8_t>(serial_hash & 0xFF);
-    out[3] = static_cast<uint8_t>((serial_hash >> 8) & 0xFF);
-    out[4] = static_cast<uint8_t>((serial_hash >> 16) & 0xFF);
-    out[5] = static_cast<uint8_t>((serial_hash >> 24) & 0xFF);
-    out[6] = group_id;
+    out[0] = static_cast<uint8_t>(manufacturer_id & 0xFF);
+    out[1] = static_cast<uint8_t>((manufacturer_id >> 8) & 0xFF);
+    out[2] = static_cast<uint8_t>(address_id & 0xFF);
+    out[3] = static_cast<uint8_t>((address_id >> 8) & 0xFF);
+    out[4] = static_cast<uint8_t>((address_id >> 16) & 0xFF);
+    out[5] = static_cast<uint8_t>((address_id >> 24) & 0xFF);
+    out[6] = version;
     out[7] = device_type;
   }
 
   static RfAddress from_bytes(const uint8_t in[8]) {
     RfAddress addr;
-    addr.device_id = static_cast<uint16_t>(in[0]) | (static_cast<uint16_t>(in[1]) << 8);
-    addr.serial_hash = static_cast<uint32_t>(in[2]) |
+    addr.manufacturer_id = static_cast<uint16_t>(in[0]) | (static_cast<uint16_t>(in[1]) << 8);
+    addr.address_id = static_cast<uint32_t>(in[2]) |
                        (static_cast<uint32_t>(in[3]) << 8) |
                        (static_cast<uint32_t>(in[4]) << 16) |
                        (static_cast<uint32_t>(in[5]) << 24);
-    addr.group_id = in[6];
+    addr.version = in[6];
     addr.device_type = in[7];
     return addr;
   }
 
   bool operator==(const RfAddress &other) const {
-    return device_id == other.device_id &&
-           serial_hash == other.serial_hash &&
-           group_id == other.group_id &&
+    return manufacturer_id == other.manufacturer_id &&
+           address_id == other.address_id &&
+           version == other.version &&
            device_type == other.device_type;
   }
 
@@ -100,7 +100,7 @@ struct RfAddress {
   ///   2. strtoul(str, 10) — stops at first non-digit (e.g. "02RV634" → 2)
   ///   3. config[3..5] = 3 bytes big-endian of result
   ///   4. config[6] = seed % 255
-  ///   5. Fixed device_id=0x2CCD, group_id=0x50, device_type=0x25
+  ///   5. Fixed manufacturer_id=0x2CCD, version=0x50, device_type=0x25
   ///
   /// Verified examples:
   ///   "MPCUA00294W6" + seed 230 → CD 2C 00 01 26 E6 50 25
@@ -123,7 +123,7 @@ struct RfAddress {
     uint8_t seed_byte = static_cast<uint8_t>(seed % 255);
 
     // Pack as 3 bytes BE (high to low) + seed_byte into u32 LE
-    addr.serial_hash = static_cast<uint32_t>((serial_digits >> 16) & 0xFF) |
+    addr.address_id = static_cast<uint32_t>((serial_digits >> 16) & 0xFF) |
                        (static_cast<uint32_t>((serial_digits >> 8) & 0xFF) << 8) |
                        (static_cast<uint32_t>(serial_digits & 0xFF) << 16) |
                        (static_cast<uint32_t>(seed_byte) << 24);
@@ -137,11 +137,26 @@ struct RfAddress {
  * In the captured traffic only 0x44 and 0x08 were observed.
  * ================================================================ */
 enum class RfFrameType : uint8_t {
-  BEACON = 0x08,       // Mode 3: wake/beacon (short encrypted frame)
+  BEACON = 0x08,       // Mode 3: wake/beacon (short encrypted frame) — M-Bus RSP_UD
   DATA = 0x46,         // Mode 1: data frame
   ACK = 0x44,          // Mode 2: ACK / response (large encrypted frame)
   PLAIN_DATA = 0x00,   // Mode 6: special-channel config (no RF AES-GCM)
 };
+
+/* ================================================================
+ * RX Frame Types — incoming (meter→CIU) header byte [1].
+ * Compared as the raw byte (the router decides even on CRC-fail).
+ *
+ * These byte values are the M-Bus (EN 13757-2) data-link Control field (C-field)
+ * function codes — but with roles repurposed for Nartis's RF beacon scheme (here
+ * the meter acts as the M-Bus "master"), so the names below describe the observed
+ * behavior, not the standard M-Bus semantics.
+ * ================================================================ */
+static constexpr uint8_t RX_TYPE_PRESENCE_ACK  = 0x06;  // answer to the pairing probe (Nartis-specific, not M-Bus)
+static constexpr uint8_t RX_TYPE_SHORT_ACK     = 0x40;  // no-data / wake / cycle-close ack — M-Bus SND_NKE
+static constexpr uint8_t RX_TYPE_DATA          = 0x43;  // data response (nested-encrypted DLMS) — M-Bus SND_UD (FCV=0)
+static constexpr uint8_t RX_TYPE_SESSION_SETUP = 0x53;  // key-install blob — M-Bus SND_UD (FCV=1)
+static constexpr uint8_t RX_TYPE_REQUEST_ACK   = 0x5B;  // "got request, preparing data" — M-Bus REQ_UD2
 
 /* ================================================================
  * RF Frame Header Offsets — OUTGOING (CIU → meter)
@@ -152,7 +167,7 @@ static constexpr size_t RF_TX_LENGTH       =  0;  // length-1
 static constexpr size_t RF_TX_FLAGS        =  1;  // RfFrameType value
 static constexpr size_t RF_TX_ADDR         =  2;  // 8 bytes: CIU address
 static constexpr size_t RF_TX_ADDR_LEN     =  8;
-static constexpr size_t RF_TX_MODE_MARKER  = 10;  // 0x7A normal | 0x8A special
+static constexpr size_t RF_TX_CI_FIELD  = 10;  // 0x7A normal | 0x8A special
 static constexpr size_t RF_TX_SEQUENCE     = 11;  // per-mode sequence counter
 static constexpr size_t RF_TX_CHANNEL_BYTE = 12;  // (chan<<6) | (quality & 0x3F)
 static constexpr size_t RF_TX_ENC_FLAG     = 13;  // 0x01 encrypted | 0x00 plain

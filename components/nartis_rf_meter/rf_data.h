@@ -9,7 +9,7 @@
  *     [0]     length-1
  *     [1]     flags (0x44 ACK | 0x46 DATA | 0x08 BEACON | 0x00 PLAIN)
  *     [2..9]  CIU address (CD 2C + hash[4] + group + type)
- *     [10]    mode_marker (0x7A normal | 0x8A special)
+ *     [10]    ci_field (0x7A normal | 0x8A special)
  *     [11]    sequence
  *     [12]    channel_byte = (chan_idx << 6) | (quality & 0x3F)
  *     [13]    enc_flag (0x01 encrypted)
@@ -52,7 +52,7 @@ class RfDataLayer {
   void set_address(const RfAddress &addr);
 
   /// Set the expected meter address (used to filter incoming frames).
-  /// If `group_id`/`device_type` are zero in `addr`, address matching skips them.
+  /// If `version`/`device_type` are zero in `addr`, address matching skips them.
   void set_meter_address(const RfAddress &addr);
   const RfAddress &get_meter_address() const { return meter_address_; }
 
