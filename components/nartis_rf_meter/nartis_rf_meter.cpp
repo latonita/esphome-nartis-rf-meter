@@ -644,13 +644,13 @@ void NartisRfMeterComponent::handle_state_() {
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         if (raw_type == 0x5B) {
-          ESP_LOGD(TAG, "GET cycle: meter ack'd request (0x5B), requesting data via BEACON");
+          ESP_LOGV(TAG, "GET cycle: meter ack'd request (0x5B), requesting data via BEACON");
           retry_count_ = 0;
           set_state_(State::GET_REQ_BEACON_TX);
         } else if (raw_type == 0x43) {
           // Meter answered the GET directly with data (no keepalive/beacon round-trip
           // needed) — matches genuine captures (licon spi4 #10→#12, real01 #1→#4).
-          ESP_LOGD(TAG, "GET cycle: meter answered GET directly with data (0x43)");
+          ESP_LOGV(TAG, "GET cycle: meter answered GET directly with data (0x43)");
           retry_count_ = 0;
           handle_data_response_();
         } else {
@@ -1313,7 +1313,7 @@ bool NartisRfMeterComponent::handle_get_response_() {
 
   if (!session_primed_) {
     // Priming normal-get response — discard, don't touch batch state.
-    ESP_LOGI(TAG, "Priming response: parsed %u result slots — discarding", got_count);
+    ESP_LOGD(TAG, "Priming response: parsed %u result slots — discarding", got_count);
   } else {
     // Guard: a real with-list answer returns exactly one result per requested
     // attribute (access-errors included as invalid slots). A count mismatch
@@ -1327,12 +1327,16 @@ bool NartisRfMeterComponent::handle_get_response_() {
     }
     // Store each result into the corresponding user-sensor slot.
     for (uint8_t i = 0; i < got_count && (batch_start_idx_ + i) < sensors_.size(); i++) {
+      const uint8_t idx = batch_start_idx_ + i;
+      const uint8_t *ob = sensors_[idx].obis.bytes;  // OBIS groups A.B.C.D.E.F
       if (values[i].has_value()) {
-        sensors_[batch_start_idx_ + i].last_value = values[i];
-        ESP_LOGI(TAG, "  sensor[%u] value OK (dlms_type=0x%02X, %u B)",
-                 batch_start_idx_ + i, values[i].dtype, values[i].raw_len);
+        sensors_[idx].last_value = values[i];
+        ESP_LOGD(TAG, "  sensor[%u] OBIS %u.%u.%u.%u.%u.%u value OK (dlms_type=0x%02X, %u B)",
+                 idx, ob[0], ob[1], ob[2], ob[3], ob[4], ob[5],
+                 values[i].dtype, values[i].raw_len);
       } else {
-        ESP_LOGW(TAG, "  sensor[%u] no value (compound type or parse-fail)", batch_start_idx_ + i);
+        ESP_LOGW(TAG, "  sensor[%u] OBIS %u.%u.%u.%u.%u.%u no value (compound type or parse-fail)",
+                 idx, ob[0], ob[1], ob[2], ob[3], ob[4], ob[5]);
       }
     }
     batch_start_idx_ += batch_count_;
@@ -1355,7 +1359,7 @@ void NartisRfMeterComponent::advance_after_get_() {
   // cycle). Mark the session primed and continue to the first with-list read.
   if (!session_primed_) {
     session_primed_ = true;
-    ESP_LOGI(TAG, "Session primed — proceeding to with-list reads");
+    ESP_LOGD(TAG, "Session primed — proceeding to with-list reads");
     // The session is now proven working end-to-end (handshake + priming read).
     // Persist it so a reboot resumes without re-pairing. (session_primed_ itself
     // is not stored — a restored session always re-primes once.)
