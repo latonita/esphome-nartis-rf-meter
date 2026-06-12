@@ -148,6 +148,17 @@ void NartisRfMeterComponent::load_pairing_state_() {
     ESP_LOGW(TAG, "Pairing restore: FAIL — saved key is for a different meter serial, will re-pair");
     return;
   }
+  // Guard against our own identity changing (ciu_serial / ciu_address / MAC):
+  // the meter only answers the CIU address it paired with. address_ was already
+  // derived in setup() before this runs, so compare the saved pair-time address.
+  uint8_t our_addr[8];
+  address_.to_bytes(our_addr);
+  if (memcmp(s.ciu_addr, our_addr, 8) != 0) {
+    ESP_LOGW(TAG, "Pairing restore: FAIL — saved session is for a different CIU address "
+                  "(%s), our address is now %s — will re-pair",
+             format_hex_pretty(s.ciu_addr, 8).c_str(), format_hex_pretty(our_addr, 8).c_str());
+    return;
+  }
 
   rf_.set_aes_key(s.aes_key);
   rf_.set_meter_address(RfAddress::from_bytes(s.meter_addr));
@@ -176,6 +187,7 @@ void NartisRfMeterComponent::save_pairing_state_() {
   rf_.get_aes_key(s.aes_key);
   RfAddress meter = rf_.get_meter_address();
   meter.to_bytes(s.meter_addr);
+  address_.to_bytes(s.ciu_addr);
   s.frame_counter = rf_.get_frame_counter();
   s.last_rx_counter = rf_.get_last_rx_counter();
   s.last_nested_rx_counter = rf_.get_last_nested_rx_counter();

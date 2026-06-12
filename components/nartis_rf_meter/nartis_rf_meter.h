@@ -36,6 +36,7 @@ struct NvsPairingState {
   uint32_t version;                 // kNvsStateVersion; mismatch ⇒ ignore blob
   uint8_t  aes_key[AES_KEY_SIZE];   // meter-assigned data key (ASCII(SN)[12] + suffix[4])
   uint8_t  meter_addr[8];           // learned meter RF address (RX filter)
+  uint8_t  ciu_addr[8];             // our own RF address at pair time; mismatch ⇒ identity changed, re-pair
   uint32_t frame_counter;           // last TX GCM counter used (rf_)
   uint32_t last_rx_counter;         // RX replay counter
   uint32_t last_nested_rx_counter;  // nested-RX replay counter
@@ -369,7 +370,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   esphome::ESPPreferenceObject pref_;
   // Bump when NvsPairingState layout/semantics change — a mismatch makes
   // load_pairing_state_() ignore the stored blob and re-pair.
-  static constexpr uint32_t NVS_STATE_VERSION_ = 1;
+  static constexpr uint32_t NVS_STATE_VERSION_ = 2;
   // On restore, advance the TX frame counter past any values that may have been
   // used in an in-flight cycle but not persisted before a crash, so the meter
   // never sees a replayed counter. Must exceed the encrypted-TX count of a
