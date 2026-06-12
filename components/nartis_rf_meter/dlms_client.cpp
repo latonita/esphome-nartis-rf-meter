@@ -495,17 +495,18 @@ void DlmsClient::data_to_string(DlmsDataType value_type, const uint8_t *data, si
     case DlmsDataType::OCTET_STRING:
     case DlmsDataType::VISIBLE_STRING:
     case DlmsDataType::UTF8_STRING: {
-      // Copy the raw bytes as ASCII. The meter stores textual registers
-      // (serials, etc.) as octet-strings whose bytes ARE the ASCII codes —
-      // e.g. 30 32 33 32 33 30 30 31 31 31 31 31 => "023230011111". Trailing
-      // NUL padding is trimmed; any non-printable byte (incl. an interior NUL)
-      // becomes '.', so a zero byte never truncates the string mid-way.
+      // Copy the raw bytes verbatim. The meter stores textual registers
+      // (serials, names, etc.) as octet-strings whose bytes ARE the character
+      // codes — ASCII for digits, CP1251 for Cyrillic. Trailing NUL padding is
+      // trimmed; control bytes (< 0x20) become '.' so an interior NUL never
+      // truncates mid-string. High bytes (>= 0x80, CP1251) are preserved here
+      // and converted to UTF-8 by the caller before publishing.
       size_t eff = len;
       while (eff > 0 && data[eff - 1] == 0x00) eff--;
       size_t pos = 0;
       for (size_t i = 0; i < eff && pos + 1 < buf_size; i++) {
         const uint8_t b = data[i];
-        buffer[pos++] = (b >= 0x20 && b <= 0x7E) ? static_cast<char>(b) : '.';
+        buffer[pos++] = (b >= 0x20) ? static_cast<char>(b) : '.';
       }
       buffer[pos] = '\0';
       break;

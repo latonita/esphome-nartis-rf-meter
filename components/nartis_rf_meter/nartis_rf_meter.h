@@ -392,7 +392,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
    */
   uint8_t batch_start_idx_{0};                 // index into sensors_ of current batch's first attr
   uint8_t batch_count_{0};                     // attrs in the currently-pending batch
-  static constexpr uint8_t USER_BATCH_SIZE_DEFAULT_ = 1;
+  static constexpr uint8_t USER_BATCH_SIZE_DEFAULT_ = 5;
 
   /* Noisy-RX retry-within-window state.
    * On a parse failure where the frame's type byte isn't what we expect

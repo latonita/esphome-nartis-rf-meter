@@ -1,180 +1,55 @@
 esphome:
-  name: nartis-rf-meter
-  friendly_name: Nartis RF Meter
+  name: nartis-rf-reader
+  friendly_name: Nartis RF Meter Reader
 
 esp32:
   board: esp32dev
   framework:
     type: esp-idf
 
-# Enable logging — DEBUG shows state transitions and hex dumps,
-# VERBOSE shows individual RX chunk arrivals
 logger:
   level: DEBUG
-  logs:
-    nartis_rf_meter: DEBUG
-    cmt2300a_hal: DEBUG
-    rf_data: DEBUG
+  
+  # level: VERBOSE
+  # tx_buffer_size: 2048
+# VERBOSE prints state transitions and full RX/TX hex dumps. tx_buffer_size must
+# be raised so long DLMS frame dumps are not truncated mid-line. Lower to DEBUG
+# or INFO for everyday use.
 
-# Enable Home Assistant API
-api:
-  encryption:
-    key: !secret api_encryption_key
+# Home Assistant API / OTA / Wi-Fi — uncomment and fill in your secrets to use.
+#api:
+#  encryption:
+#    key: !secret api_encryption_key
 
-ota:
-  - platform: esphome
-    password: !secret ota_password
+#ota:
+#  - platform: esphome
+#    password: !secret ota_password
 
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  ap:
-    ssid: "Nartis-RF-Fallback"
-    password: !secret fallback_password
+#wifi:
+#  ssid: !secret wifi_ssid
+#  password: !secret wifi_password
 
-# Time source is OPTIONAL. The component synthesizes an advancing clock for the
-# beacon timestamp on its own; if a real time source is present it uses that.
-#time:
-#  - platform: homeassistant
-#    id: homeassistant_time
-
-# Web server for easy debugging without HA
-web_server:
-  port: 80
-
-# External component — our nartis_rf_meter
 external_components:
-  - source:
-      type: local
-      path: components
+  # Pull from GitHub:
+  - source: github://latonita/esphome-nartis-rf-meter
+    components: [nartis_rf_meter]
+    refresh: 1s
 
-# CMT2300A RF transceiver wiring (ESP32 GPIOs — adjust to your board):
-#
-#   CMT2300A pin  ->  ESP32 GPIO
-#   SDIO (data)   ->  GPIO23
-#   SCLK (clock)  ->  GPIO18
-#   CSB  (reg CS)  -> GPIO5
-#   FCSB (FIFO CS) -> GPIO17
-#   GPIO3 (IRQ/INT2) -> GPIO34
-#   VDD            -> 3.3V
-#   GND            -> GND
-#
+# CMT2300A RF transceiver wiring (ESP32 GPIOs — adjust to your board).
 nartis_rf_meter:
   id: nartis
-
-  # CMT2300A pins
   pin_sdio: GPIO23
   pin_sclk: GPIO18
   pin_csb: GPIO27
   pin_fcsb: GPIO26
-  pin_gpio3: GPIO34
+  pin_gpio3: GPIO14               # INT2 — обязательно
+  meter_serial: "012345678901"    # 12 цифр с шильдика счётчика
+  use_alternative_channels: true  # альтернативная сетка частот (если счётчик не отвечает)
+  batch_size: 10                  # читать до 10 атрибутов одним запросом
 
-  # Meter serial — the 12-digit number printed on the meter's nameplate
-  # (e.g. "021245003137"). 
-  meter_serial: "012345678901"
-
-  # Use of alternative RF channels in some cases solves a problem of no reply from the meter
-  #use_alternative_channels: true
-
-  # How often to poll the meter (default 5m)
-  update_interval: 5m
-
-# Sensors — OBIS codes for common Nartis I100/I300 registers
 sensor:
   - platform: nartis_rf_meter
-    name: "Voltage"
-    obis_code: "1.0.12.7.0.255"
-    unit_of_measurement: V
-    accuracy_decimals: 1
-    device_class: voltage
-    state_class: measurement
-    filters:
-      - multiply: 0.1
-
-  - platform: nartis_rf_meter
-    name: "Voltage A"
-    obis_code: "1.0.32.7.0.255"
-    unit_of_measurement: V
-    accuracy_decimals: 1
-    device_class: voltage
-    state_class: measurement
-    filters:
-      - multiply: 0.1
-  
-  - platform: nartis_rf_meter
-    name: "Voltage B"
-    obis_code: "1.0.52.7.0.255"
-    unit_of_measurement: V
-    accuracy_decimals: 1
-    device_class: voltage
-    state_class: measurement
-    filters:
-      - multiply: 0.1
-  
-  - platform: nartis_rf_meter
-    name: "Voltage C"
-    obis_code: "1.0.72.7.0.255"
-    unit_of_measurement: V
-    accuracy_decimals: 1
-    device_class: voltage
-    state_class: measurement
-    filters:
-      - multiply: 0.1
-  
-  - platform: nartis_rf_meter
-    name: "Current"
-    obis_code: "1.0.11.7.0.255"
-    unit_of_measurement: A
-    accuracy_decimals: 2
-    device_class: current
-    state_class: measurement
-    filters:
-      - multiply: 0.1
-
-  - platform: nartis_rf_meter
-    name: "Current Neutral"
-    obis_code: "1.0.91.7.0.255"
-    unit_of_measurement: A
-    accuracy_decimals: 2
-    device_class: current
-    state_class: measurement
-    filters:
-      - multiply: 0.1
-
-  - platform: nartis_rf_meter
-    name: "Active energy total"
-    obis_code: "1.0.1.8.0.255"
-    unit_of_measurement: kWh
-    accuracy_decimals: 0
-    device_class: energy
-    state_class: total_increasing
-
-  - platform: nartis_rf_meter
-    name: "Active energy T1"
-    obis_code: "1.0.1.8.1.255"
-    unit_of_measurement: kWh
-    accuracy_decimals: 0
-    device_class: energy
-    state_class: total_increasing
-
-  - platform: nartis_rf_meter
-    name: "Active energy T2"
-    obis_code: "1.0.1.8.2.255"
-    unit_of_measurement: kWh
-    accuracy_decimals: 0
-    device_class: energy
-    state_class: total_increasing
-
-  - platform: nartis_rf_meter
-    name: "Active Power"
-    obis_code: "1.0.1.7.0.255"
-    unit_of_measurement: W
-    accuracy_decimals: 1
-    device_class: power
-    state_class: measurement
-
-  - platform: nartis_rf_meter
-    name: "Frequency"
+    name: "Frequency"            # Частота сети
     obis_code: "1.0.14.7.0.255"
     unit_of_measurement: Hz
     accuracy_decimals: 2
@@ -184,11 +59,136 @@ sensor:
       - multiply: 0.01
 
   - platform: nartis_rf_meter
-    name: "Temperature"
+    name: "Current L1"           # Ток фазы 1
+    obis_code: "1.0.31.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.001
+
+  - platform: nartis_rf_meter
+    name: "Voltage L1"           # Напряжение фазы 1
+    obis_code: "1.0.32.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Current L2"           # Ток фазы 2
+    obis_code: "1.0.51.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.001
+
+  - platform: nartis_rf_meter
+    name: "Voltage L2"           # Напряжение фазы 2
+    obis_code: "1.0.52.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Current L3"           # Ток фазы 3
+    obis_code: "1.0.71.7.0.255"
+    unit_of_measurement: A
+    accuracy_decimals: 2
+    device_class: current
+    state_class: measurement
+    filters:
+      - multiply: 0.001
+
+  - platform: nartis_rf_meter
+    name: "Voltage L3"           # Напряжение фазы 3
+    obis_code: "1.0.72.7.0.255"
+    unit_of_measurement: V
+    accuracy_decimals: 1
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+  - platform: nartis_rf_meter
+    name: "Active Power"         # Активная мощность
+    obis_code: "1.0.1.7.0.255"
+    unit_of_measurement: W
+    accuracy_decimals: 1
+    device_class: power
+    state_class: measurement
+
+  - platform: nartis_rf_meter
+    name: "Active energy total"  # Активная энергия, всего
+    obis_code: "1.0.1.8.0.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
+    name: "Active energy T1"     # Активная энергия, тариф 1
+    obis_code: "1.0.1.8.1.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
+    name: "Active energy T2"     # Активная энергия, тариф 2
+    obis_code: "1.0.1.8.2.255"
+    unit_of_measurement: kWh
+    accuracy_decimals: 0
+    device_class: energy
+    state_class: total_increasing
+
+  - platform: nartis_rf_meter
+    name: "Temperature"          # Температура
     obis_code: "0.0.96.9.0.255"
     unit_of_measurement: °C
     accuracy_decimals: 2
     device_class: temperature
     state_class: measurement
     filters:
-      - multiply: 0.01
+      - multiply: 0.1
+
+text_sensor:
+  - platform: nartis_rf_meter
+    name: "Meter Clock"          # Часы счётчика
+    obis_code: "0.0.1.0.0.255"
+    obis_class: 8
+    icon: mdi:clock-outline
+    entity_category: diagnostic
+
+  - platform: nartis_rf_meter
+    name: "Serial Number"        # Серийный номер
+    obis_code: "0.0.96.1.0.255"
+
+  - platform: nartis_rf_meter
+    name: "Model"                # Модель
+    obis_code: "0.0.96.1.1.255"
+
+  - platform: nartis_rf_meter
+    name: "Version"              # Версия
+    obis_code: "0.0.96.1.2.255"
+
+  - platform: nartis_rf_meter
+    name: "Manufacturer"         # Производитель
+    obis_code: "0.0.96.1.3.255"
+
+  - platform: nartis_rf_meter
+    name: "Firmware Version"     # Версия прошивки
+    obis_code: "1.0.0.2.0.255"
+
+  - platform: nartis_rf_meter
+    name: "Current Tariff"       # Текущий тариф
+    obis_code: "0.0.96.14.0.255"
+    icon: mdi:counter

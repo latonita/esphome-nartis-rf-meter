@@ -81,7 +81,7 @@ CONFIG_SCHEMA = cv.Schema(
             # --- Tuning (optional; sensible defaults — leave unset for normal use) ---
             # How many user-defined OBIS attributes to read per get-request-with-list.
             # Larger = fewer poll cycles but bigger 0x43 replies (DLMS caps at 10/list).
-            cv.Optional(CONF_BATCH_SIZE, default=1): cv.int_range(min=1, max=10),
+            cv.Optional(CONF_BATCH_SIZE, default=5): cv.int_range(min=1, max=10),
             # General RX wait before "no response": governs pairing waits and frame
             # completion once a reply has started.
             cv.Optional(

@@ -55,11 +55,11 @@
 | SCLK             | GPIO 18 | Тактовый сигнал SPI               |
 | CSB              | GPIO 27 | Chip Select (банк регистров)      |
 | FCSB             | GPIO 26 | FIFO Chip Select                  |
-| GPIO3 (INT2)     | GPIO 34 | Прерывание FIFO (обязательно)     |
+| GPIO3 (INT2)     | GPIO 14 | Прерывание FIFO (обязательно)     |
 | VDD              | 3.3V    | Питание                           |
 | GND              | GND     | Общий провод                      |
 
-> GPIO выбраны как пример — подставьте пины своей платы. На ESP32 пины 34–39 работают только на вход, что подходит для линии прерывания GPIO3.
+> GPIO выбраны как пример — подставьте пины своей платы. Линию прерывания GPIO3 можно завести на любой вход; на ESP32 для этого подходят и пины 34–39 (только вход).
 
 # Установка
 
@@ -83,7 +83,7 @@ nartis_rf_meter:
   pin_sclk: GPIO18
   pin_csb: GPIO27
   pin_fcsb: GPIO26
-  pin_gpio3: GPIO34
+  pin_gpio3: GPIO14
 
   meter_serial: "012345678901"   # 12 цифр с шильдика счётчика
   
@@ -91,7 +91,7 @@ nartis_rf_meter:
 
 sensor:
   - platform: nartis_rf_meter
-    name: "Активная мощность"
+    name: "Active Power"   # Активная мощность
     obis_code: "1.0.1.7.0.255"
     unit_of_measurement: W
     accuracy_decimals: 1
@@ -120,7 +120,7 @@ sensor:
 | `update_interval`             | время, `5min`      | Период опроса счётчика.                                                                        |
 | `fix_channel`                 | 0…3, опц.          | Зафиксировать радиоканал и отключить авто-выбор по RSSI.                                       |
 | `use_alternative_channels`    | bool, `false`      | Использовать альтернативную сетку частот — иногда помогает, если счётчик не отвечает.          |
-| `batch_size`                  | 1…10, `1`          | Сколько OBIS-атрибутов читать одним запросом get-request-with-list.                            |
+| `batch_size`                  | 1…10, `5`          | Сколько OBIS-атрибутов читать одним запросом get-request-with-list.                            |
 | `rx_timeout`                  | время, `3000ms`    | Общий таймаут ожидания ответа (сопряжение и завершение приёма кадра).                          |
 | `rx_reply_timeout`            | время, `900ms`     | Короткий таймаут ожидания ответа на GET — до прихода первого байта.                            |
 
@@ -132,7 +132,7 @@ sensor:
 ```yaml
 sensor:
   - platform: nartis_rf_meter
-    name: "Напряжение фаза A"
+    name: "Voltage L1"   # Напряжение фазы 1
     obis_code: "1.0.32.7.0.255"
     unit_of_measurement: V
     accuracy_decimals: 1
@@ -149,18 +149,18 @@ sensor:
 ```yaml
 text_sensor:
   - platform: nartis_rf_meter
-    name: "Серийный номер"
+    name: "Serial Number"   # Серийный номер
     obis_code: "0.0.96.1.0.255"
 ```
 
-Octet-string данные декодируются как ASCII-текст (байты — это коды символов: `30 32 33 …` → `"023…"`). Завершающие нулевые байты отбрасываются, непечатаемые байты заменяются на `.`.
+Octet-string данные декодируются как текст (байты — это коды символов: `30 32 33 …` → `"023…"`). Завершающие нулевые байты отбрасываются, управляющие байты (< 0x20) заменяются на `.`. Текстовые значения счётчика приходят в кодировке **CP1251** и автоматически конвертируются в **UTF-8**, поэтому кириллица (название, модель, производитель) отображается корректно.
 
 Для объекта **Clock (класс 8)** укажите `obis_class: 8` — значение времени будет отформатировано как `ГГГГ-ММ-ДД ЧЧ:ММ:СС[.сс][ ±ЧЧ:ММ]`:
 
 ```yaml
 text_sensor:
   - platform: nartis_rf_meter
-    name: "Часы счётчика"
+    name: "Meter Clock"   # Часы счётчика
     obis_code: "0.0.1.0.0.255"
     obis_class: 8
 ```
@@ -182,10 +182,11 @@ nartis_rf_meter:
   pin_sclk: GPIO18
   pin_csb: GPIO27
   pin_fcsb: GPIO26
-  pin_gpio3: GPIO34
+  pin_gpio3: GPIO14
   meter_serial: "012345678901"
-  update_interval: 5min # не засоряйте эфир, не делайте чаще 
-  # use_alternative_channels: true   # раскомментируйте, если счётчик не отвечает
+  #use_alternative_channels: true  # альтернативная сетка частот (если счётчик не отвечает)
+  batch_size: 10                  # читать до 10 атрибутов одним запросом
+  update_interval: 5min           # не засоряйте эфир, не делайте чаще
 
 sensor:
   - platform: nartis_rf_meter
@@ -226,7 +227,7 @@ sensor:
     device_class: current
     state_class: measurement
     filters:
-      - multiply: 0.1
+      - multiply: 0.001
 
   - platform: nartis_rf_meter
     name: "Current B" # Ток фаза B
@@ -236,7 +237,7 @@ sensor:
     device_class: current
     state_class: measurement
     filters:
-      - multiply: 0.1
+      - multiply: 0.001
 
   - platform: nartis_rf_meter
     name: "Current C" # Ток фаза C
@@ -246,7 +247,7 @@ sensor:
     device_class: current
     state_class: measurement
     filters:
-      - multiply: 0.1
+      - multiply: 0.001
 
   - platform: nartis_rf_meter
     name: "Active power" # Активная мощность (сумма)
@@ -281,7 +282,7 @@ sensor:
     state_class: total_increasing
 
   - platform: nartis_rf_meter
-    name: Frequency # Частота сети
+    name: "Frequency" # Частота сети
     obis_code: "1.0.14.7.0.255"
     unit_of_measurement: Hz
     accuracy_decimals: 2
@@ -289,6 +290,49 @@ sensor:
     state_class: measurement
     filters:
       - multiply: 0.01
+
+  - platform: nartis_rf_meter
+    name: "Temperature"          # Температура
+    obis_code: "0.0.96.9.0.255"
+    unit_of_measurement: °C
+    accuracy_decimals: 2
+    device_class: temperature
+    state_class: measurement
+    filters:
+      - multiply: 0.1
+
+text_sensor:
+  - platform: nartis_rf_meter
+    name: "Meter Clock"          # Часы счётчика
+    obis_code: "0.0.1.0.0.255"
+    obis_class: 8
+    icon: mdi:clock-outline
+    entity_category: diagnostic
+
+  - platform: nartis_rf_meter
+    name: "Serial Number"        # Серийный номер
+    obis_code: "0.0.96.1.0.255"
+
+  - platform: nartis_rf_meter
+    name: "Model"                # Модель
+    obis_code: "0.0.96.1.1.255"
+
+  - platform: nartis_rf_meter
+    name: "Version"              # Версия
+    obis_code: "0.0.96.1.2.255"
+
+  - platform: nartis_rf_meter
+    name: "Manufacturer"         # Производитель
+    obis_code: "0.0.96.1.3.255"
+
+  - platform: nartis_rf_meter
+    name: "Firmware Version"     # Версия прошивки
+    obis_code: "1.0.0.2.0.255"
+
+  - platform: nartis_rf_meter
+    name: "Current Tariff"       # Текущий тариф
+    obis_code: "0.0.96.14.0.255"
+    icon: mdi:counter
 
 ```
 
@@ -303,6 +347,7 @@ sensor:
   ```yaml
   logger:
     level: VERY_VERBOSE
+    tx_buffer_size: 2048 # длинные кадры могут обрезаться на выводе без этой настройки
   ```
 
 - **Повторное сопряжение.** Если связь со счётчиком теряется, после нескольких неудачных чтений подряд компонент сам делает повторное сопряжение на следующем интервале.
