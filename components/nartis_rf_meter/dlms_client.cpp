@@ -1,5 +1,5 @@
 /*
- * Nartis DLMS Client — Implementation
+ * Nartis DLMS Client - Implementation
  *
  * Lightweight DLMS/COSEM APDU builder and parser.
  */
@@ -16,7 +16,7 @@ namespace esphome::nartis_rf_meter {
 
 static const char *const TAG = "dlms_client";
 
-// get-response framing bytes (meter→CIU).
+// get-response framing bytes (meter->CIU).
 static constexpr uint8_t DLMS_GET_RESPONSE   = 0xC4;  // get-response tag (request tag is 0xC0)
 static constexpr uint8_t DLMS_RESP_WITH_LIST = 0x03;  // response type: with-list
 static constexpr uint8_t DLMS_RESP_NORMAL    = 0x01;  // response type: normal
@@ -45,7 +45,7 @@ void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uin
 }
 
 /* ================================================================
- * Read Request Builder — DLMS get-request-with-list
+ * Read Request Builder - DLMS get-request-with-list
  *
  * The meter uses the standard DLMS `get-request-with-list` form, NOT
  * `get-request-normal`, even when only one attribute is interesting. Meter
@@ -54,14 +54,14 @@ void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uin
  *
  * Format:
  *
- *   c0 03                          ← tag + type (get-request-with-list)
- *   c1                             ← invoke-id-priority
- *   N                              ← attribute-list count (1..10)
- *   [N × 10-byte attribute spec]:
- *     2 B    class-id (BE u16)     ← e.g. 00 01 = 1 (Data class)
- *     6 B    OBIS code             ← e.g. 00 00 60 80 03 FF
- *     1 B    attr-id               ← e.g. 02 (value)
- *     1 B    access-selector       ← 0x00 (none)
+ *   c0 03                          <- tag + type (get-request-with-list)
+ *   c1                             <- invoke-id-priority
+ *   N                              <- attribute-list count (1..10)
+ *   [N x 10-byte attribute spec]:
+ *     2 B    class-id (BE u16)     <- e.g. 00 01 = 1 (Data class)
+ *     6 B    OBIS code             <- e.g. 00 00 60 80 03 FF
+ *     1 B    attr-id               <- e.g. 02 (value)
+ *     1 B    access-selector       <- 0x00 (none)
  *
  * The legacy single-OBIS form is kept as `build_read_request_normal` for
  * reference but not used in the GET path.
@@ -132,7 +132,7 @@ size_t DlmsClient::build_get_request_normal(uint8_t *out, size_t max,
 }
 
 /* ================================================================
- * Read Response Parser — Proprietary Nartis Protocol
+ * Read Response Parser - Proprietary Nartis Protocol
  *
  * The meter's response format is:
  *   [0-2]  = 3-byte envelope header (stripped)
@@ -156,7 +156,7 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
   // Skip 3-byte envelope header
   size_t offset = 3;
 
-  // Check status byte — must be 0x00 for success
+  // Check status byte - must be 0x00 for success
   if (data[offset] != 0x00) {
     ESP_LOGW(TAG, "Read response error: status=0x%02X", data[offset]);
     return false;
@@ -180,14 +180,14 @@ bool DlmsClient::parse_read_response(const uint8_t *data, size_t len, DlmsValue 
 }
 
 /* ================================================================
- * Multi-result response parser — get-response-with-list
+ * Multi-result response parser - get-response-with-list
  *
  * Decrypted payload layout:
  *
- *   0d fd f8 <2B tag/id>           ← Nartis prefix (5 bytes, optional)
- *   00 01 00 01 00 66 00 <len>     ← IEC 62056-47 wrapper (8 bytes)
- *   c4 03 c1 <count>               ← get-response-with-list header
- *   <count × result>               ← each: tag (0=data | 1=err) + value
+ *   0d fd f8 <2B tag/id>           <- Nartis prefix (5 bytes, optional)
+ *   00 01 00 01 00 66 00 <len>     <- IEC 62056-47 wrapper (8 bytes)
+ *   c4 03 c1 <count>               <- get-response-with-list header
+ *   <count x result>               <- each: tag (0=data | 1=err) + value
  *
  * Each `data` result is a DLMS typed value (already handled by parse_typed_value).
  * Compound types (structure / array) are length-prefixed: we recursively skip
@@ -290,17 +290,17 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
     return false;
   }
   // Our user reads are always get-request-with-list, and the meter always
-  // answers them with get-response-with-list (0xC4 0x03) — even a 1-attr batch
-  // (a single-OBIS request still returns `C4 03 C1 01 …`). The ONLY
+  // answers them with get-response-with-list (0xC4 0x03) - even a 1-attr batch
+  // (a single-OBIS request still returns `C4 03 C1 01 ...`). The ONLY
   // thing that emits get-response-normal (0xC4 0x01) is the priming
   // get-request-normal. The meter sometimes BUFFERS that priming answer and
   // delivers it LATE, landing as the first 0x43 of the user-read phase. If we
   // accepted the normal form here we'd store its stray scalar into the first
-  // batch slot (e.g. Voltage) — the bogus 5.4e17 V reading. Reject anything
+  // batch slot (e.g. Voltage) - the bogus 5.4e17 V reading. Reject anything
   // that isn't a with-list response so the caller re-sends the request and
   // gets the real C4 03 answer.
   if (data[pos + 1] != DLMS_RESP_WITH_LIST) {
-    ESP_LOGW(TAG, "list response: not get-response-with-list (got 0x%02X 0x%02X) — "
+    ESP_LOGW(TAG, "list response: not get-response-with-list (got 0x%02X 0x%02X) - "
                   "ignoring stale/mismatched response", data[pos], data[pos + 1]);
     return false;
   }
@@ -354,7 +354,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
       }
       stored++;
     } else {
-      // Compound, or we've run out of caller-supplied slots — just skip.
+      // Compound, or we've run out of caller-supplied slots - just skip.
       int s = skip_typed_value(data + pos, len - pos);
       if (s < 0) {
         ESP_LOGW(TAG, "  [%d] skip failed (type=0x%02X)", i, type_byte);
@@ -377,7 +377,7 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
  * COSEM date-time formatter
  *
  * Renders the 12-byte COSEM date_time octet layout as
- *   "YYYY-MM-DD HH:MM:SS[.cc][ ±HH:MM]"
+ *   "YYYY-MM-DD HH:MM:SS[.cc][ +/-HH:MM]"
  * Unspecified fields (0xFF / year 0x0000|0xFFFF) print as '?'; the
  * hundredths and timezone-deviation suffixes are omitted when not present.
  * Layout: [0..1] year BE, [2] month, [3] day, [4] day-of-week (ignored),
@@ -430,7 +430,7 @@ static void format_cosem_datetime(const uint8_t *data, size_t len,
     advance(snprintf(buffer + pos, buf_size - pos, "%02u", second));
   else
     advance(snprintf(buffer + pos, buf_size - pos, "??"));
-  // Seconds are the minimal resolution we report — hundredths are not useful.
+  // Seconds are the minimal resolution we report - hundredths are not useful.
   // if (hundredths != 0xFF && hundredths <= 99)
   //   advance(snprintf(buffer + pos, buf_size - pos, ".%02u", hundredths));
   (void) hundredths;
@@ -506,7 +506,7 @@ void DlmsClient::data_to_string(DlmsDataType value_type, const uint8_t *data, si
     case DlmsDataType::UTF8_STRING: {
       // Copy the raw bytes verbatim. The meter stores textual registers
       // (serials, names, etc.) as octet-strings whose bytes ARE the character
-      // codes — ASCII for digits, CP1251 for Cyrillic. Trailing NUL padding is
+      // codes - ASCII for digits, CP1251 for Cyrillic. Trailing NUL padding is
       // trimmed; control bytes (< 0x20) become '.' so an interior NUL never
       // truncates mid-string. High bytes (>= 0x80, CP1251) are preserved here
       // and converted to UTF-8 by the caller before publishing.

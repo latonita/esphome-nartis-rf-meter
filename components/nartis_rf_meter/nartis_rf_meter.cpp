@@ -1,5 +1,5 @@
 /*
- * Nartis RF Meter — ESPHome Component Implementation
+ * Nartis RF Meter - ESPHome Component Implementation
  *
  * Non-blocking state machine orchestrating CMT2300A HAL, RF framing, and DLMS client.
  */
@@ -68,7 +68,7 @@ void NartisRfMeterComponent::setup_continue_() {
 }
 
 void NartisRfMeterComponent::start_cycle_() {
-  session_start_ms_ = esphome::millis();  // start of the meter session — measured to PUBLISH
+  session_start_ms_ = esphome::millis();  // start of the meter session - measured to PUBLISH
   current_sensor_idx_ = 0;
   retry_count_ = 0;
   pair_retry_ = 0;
@@ -84,7 +84,7 @@ void NartisRfMeterComponent::start_cycle_() {
 }
 
 void NartisRfMeterComponent::abort_to_idle_(const char *reason) {
-  ESP_LOGW(TAG, "%s — returning to IDLE, will retry on next update().", reason);
+  ESP_LOGW(TAG, "%s - returning to IDLE, will retry on next update().", reason);
   finish_rx_();
   hal_.go_sleep();
   note_cycle_failure_();
@@ -98,13 +98,13 @@ void NartisRfMeterComponent::abort_to_idle_(const char *reason) {
 
 void NartisRfMeterComponent::note_cycle_failure_() {
   // Pairing-phase failures self-heal: paired_ is still false, so the next
-  // update() re-pairs anyway — don't count those toward the re-pair budget.
+  // update() re-pairs anyway - don't count those toward the re-pair budget.
   if (!paired_) return;
   consecutive_read_failures_++;
   ESP_LOGW(TAG, "Read cycle failed (%u/%u consecutive)",
            consecutive_read_failures_, MAX_READ_FAILURES_BEFORE_REPAIR_);
   if (consecutive_read_failures_ >= MAX_READ_FAILURES_BEFORE_REPAIR_) {
-    ESP_LOGW(TAG, "Too many failed reads — dropping pairing; will re-pair next cycle.");
+    ESP_LOGW(TAG, "Too many failed reads - dropping pairing; will re-pair next cycle.");
     reset_pairing_state_();
   }
 }
@@ -115,7 +115,7 @@ void NartisRfMeterComponent::reset_pairing_state_() {
   consecutive_read_failures_ = 0;
   // Restart the TX sequence counters at their fresh-pairing values. aes_key_
   // still holds the bootstrap key (only rf_'s internal key was overwritten by
-  // the meter-assigned session key at 0x53) — restore it so the re-pair ACK
+  // the meter-assigned session key at 0x53) - restore it so the re-pair ACK
   // encrypts under the factory key again.
   data_seq_ = 2;
   beacon_seq_ = 1;
@@ -131,22 +131,22 @@ void NartisRfMeterComponent::reset_pairing_state_() {
 void NartisRfMeterComponent::load_pairing_state_() {
   NvsPairingState s{};
   if (!pref_.load(&s)) {
-    ESP_LOGI(TAG, "Pairing restore: NONE — no saved session in NVS, will pair on first cycle");
+    ESP_LOGI(TAG, "Pairing restore: NONE - no saved session in NVS, will pair on first cycle");
     return;
   }
   if (s.version != NVS_STATE_VERSION_) {
-    ESP_LOGW(TAG, "Pairing restore: FAIL — NVS version %u != expected %u, will re-pair",
+    ESP_LOGW(TAG, "Pairing restore: FAIL - NVS version %u != expected %u, will re-pair",
              (unsigned) s.version, (unsigned) NVS_STATE_VERSION_);
     return;
   }
   if (!s.paired) {
-    ESP_LOGI(TAG, "Pairing restore: NONE — saved session marked unpaired, will pair");
+    ESP_LOGI(TAG, "Pairing restore: NONE - saved session marked unpaired, will pair");
     return;
   }
   // Guard against a key saved for a different meter (config changed): the key's
   // first 12 bytes are the meter serial in ASCII.
   if (meter_serial_.size() >= 12 && memcmp(s.aes_key, meter_serial_.c_str(), 12) != 0) {
-    ESP_LOGW(TAG, "Pairing restore: FAIL — saved key is for a different meter serial, will re-pair");
+    ESP_LOGW(TAG, "Pairing restore: FAIL - saved key is for a different meter serial, will re-pair");
     return;
   }
   // Guard against our own identity changing (ciu_serial / ciu_address / MAC):
@@ -155,8 +155,8 @@ void NartisRfMeterComponent::load_pairing_state_() {
   uint8_t our_addr[8];
   address_.to_bytes(our_addr);
   if (memcmp(s.ciu_addr, our_addr, 8) != 0) {
-    ESP_LOGW(TAG, "Pairing restore: FAIL — saved session is for a different CIU address "
-                  "(%s), our address is now %s — will re-pair",
+    ESP_LOGW(TAG, "Pairing restore: FAIL - saved session is for a different CIU address "
+                  "(%s), our address is now %s - will re-pair",
              format_hex_pretty(s.ciu_addr, 8).c_str(), format_hex_pretty(our_addr, 8).c_str());
     return;
   }
@@ -176,7 +176,7 @@ void NartisRfMeterComponent::load_pairing_state_() {
   // (one frame) and reuses the restored key/counters.
   session_primed_ = false;
 
-  ESP_LOGI(TAG, "Pairing restore: OK — meter=%s, frame_counter=%u (+%u margin), rx=%u, nested_rx=%u",
+  ESP_LOGI(TAG, "Pairing restore: OK - meter=%s, frame_counter=%u (+%u margin), rx=%u, nested_rx=%u",
            format_hex_pretty(s.meter_addr, 8).c_str(),
            (unsigned) s.frame_counter, (unsigned) FRAME_COUNTER_MARGIN_,
            (unsigned) s.last_rx_counter, (unsigned) s.last_nested_rx_counter);
@@ -224,7 +224,7 @@ void NartisRfMeterComponent::dump_config() {
     const auto &entry = sensors_[i];
     const char *name = entry.sensor ? entry.sensor->get_name().c_str()
                                     : (entry.text_sensor ? entry.text_sensor->get_name().c_str() : "?");
-    ESP_LOGCONFIG(TAG, "    [%d] %s — OBIS %d.%d.%d.%d.%d.%d class=%d attr=%d",
+    ESP_LOGCONFIG(TAG, "    [%d] %s - OBIS %d.%d.%d.%d.%d.%d class=%d attr=%d",
                   (int) i, name,
                   entry.obis.bytes[0], entry.obis.bytes[1], entry.obis.bytes[2],
                   entry.obis.bytes[3], entry.obis.bytes[4], entry.obis.bytes[5],
@@ -236,13 +236,13 @@ void NartisRfMeterComponent::update() {
   // The polling interval is the read cadence. Only start a cycle when idle:
   //   - NOT_INITIALIZED: HAL still in the 2 s setup defer; next tick will catch it.
   //   - any active state: a cycle is still running; skip this tick.
-  // start_cycle_() always begins at RSSI scan → channel select; the pair-vs-read
+  // start_cycle_() always begins at RSSI scan -> channel select; the pair-vs-read
   // decision then happens in handle_channel_select_() based on paired_.
   if (state_ == State::NOT_INITIALIZED) {
     return;
   }
   if (state_ != State::IDLE) {
-    ESP_LOGD(TAG, "update(): cycle still running (%s) — skipping this tick",
+    ESP_LOGD(TAG, "update(): cycle still running (%s) - skipping this tick",
              LOG_STR_ARG(state_to_str(state_)));
     return;
   }
@@ -250,7 +250,7 @@ void NartisRfMeterComponent::update() {
 }
 
 void NartisRfMeterComponent::request_repair() {
-  ESP_LOGI(TAG, "Re-pair requested — will drop the session and re-pair after the "
+  ESP_LOGI(TAG, "Re-pair requested - will drop the session and re-pair after the "
                 "current cycle finishes.");
   repair_requested_ = true;
 }
@@ -261,7 +261,7 @@ void NartisRfMeterComponent::loop() {
     // in-flight read/pairing cycle.
     if (state_ == State::IDLE && repair_requested_) {
       repair_requested_ = false;
-      ESP_LOGW(TAG, "Re-pairing now — dropping the saved session and starting a fresh handshake.");
+      ESP_LOGW(TAG, "Re-pairing now - dropping the saved session and starting a fresh handshake.");
       reset_pairing_state_();
       start_cycle_();
     }
@@ -281,7 +281,7 @@ void NartisRfMeterComponent::set_meter_serial(const std::string &s) {
   // The real operational key is meter-assigned: during pairing the meter
   // delivers ASCII(serial) + a fresh per-pairing 4-byte suffix inside the 0x53
   // SESSION_SETUP (GCM-encrypted under the factory key), and that replaces this
-  // via set_aes_key() — see the 0x53 handler. The suffix is NOT a fixed
+  // via set_aes_key() - see the 0x53 handler. The suffix is NOT a fixed
   // constant; BD 02 9B BE was just one observed pair's value.
   memset(aes_key_, 0, AES_KEY_SIZE);
   size_t copy_len = s.size();
@@ -352,13 +352,13 @@ void NartisRfMeterComponent::set_state_(State new_state) {
 }
 
 bool NartisRfMeterComponent::try_rearm_rx_(const char *ctx, uint8_t got_type, int parse_result) {
-  // The +300 ms guard leaves room for one more TX→RX turnaround before the
+  // The +300 ms guard leaves room for one more TX->RX turnaround before the
   // RX window (rx_timeout_ms_) would expire, so we never re-arm into a window
   // that can't complete.
   if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
       esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
     rx_parse_retries_++;
-    ESP_LOGW(TAG, "%s: noise frame (type=0x%02X, n=%d) — re-arm RX (try %u/%u)",
+    ESP_LOGW(TAG, "%s: noise frame (type=0x%02X, n=%d) - re-arm RX (try %u/%u)",
              ctx, got_type, parse_result, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
     start_rx_();
     return true;
@@ -396,9 +396,9 @@ void NartisRfMeterComponent::handle_state_() {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
         if (t == RX_TYPE_PRESENCE_ACK && n >= 0) {
-          // Clean frame — safe to capture the meter address.
+          // Clean frame - safe to capture the meter address.
           ESP_LOGI(TAG, "Pairing: meter answered probe (0x06)");
-          lock_channel_();  // meter replied on active_channel_ — pin it for the session
+          lock_channel_();  // meter replied on active_channel_ - pin it for the session
           capture_meter_address_();
           pair_retry_ = 0;  // reset for the ACK phase
           rx_parse_retries_ = 0;
@@ -406,16 +406,16 @@ void NartisRfMeterComponent::handle_state_() {
         } else if (t == RX_TYPE_PRESENCE_ACK && n < 0 &&
                    rx_parse_retries_ < MAX_RX_PARSE_RETRIES_ &&
                    esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
-          // CRC fail with matching type byte — the address bytes could be
+          // CRC fail with matching type byte - the address bytes could be
           // corrupted too. Don't learn a poisoned address; re-arm RX and listen
-          // for a clean frame (the meter retransmits 0x06 — typically 4-5 ACKs
+          // for a clean frame (the meter retransmits 0x06 - typically 4-5 ACKs
           // in a single run).
           rx_parse_retries_++;
-          ESP_LOGW(TAG, "Pairing: 0x06 with parse fail (n=%d) — re-arm RX for clean frame "
+          ESP_LOGW(TAG, "Pairing: 0x06 with parse fail (n=%d) - re-arm RX for clean frame "
                         "(try %u/%u)", n, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
           start_rx_();
         } else if (try_rearm_rx_("Pairing probe", t, n)) {
-          // Noise frame, not the expected 0x06 — re-armed to listen for the
+          // Noise frame, not the expected 0x06 - re-armed to listen for the
           // meter's retransmission within the same wait window (it sends an ACK
           // per probe; latency ~250 ms).
         } else {
@@ -448,13 +448,13 @@ void NartisRfMeterComponent::handle_state_() {
         // Determine type from parsed value when available; on parse failure
         // (CRC/length error from a noise-corrupted frame), fall back to raw
         // byte [1]. The transport-layer routing decision only needs the
-        // frame-type byte — even a CRC-broken 0x53 should advance us to
+        // frame-type byte - even a CRC-broken 0x53 should advance us to
         // mode-6 (the meter is already past the session-setup step on its
         // side; sending mode-6 anyway closes the handshake cleanly).
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
         if (t == RX_TYPE_SESSION_SETUP) {
-          // SESSION_SETUP — the meter ships the per-pairing data key it assigns
+          // SESSION_SETUP - the meter ships the per-pairing data key it assigns
           // this CIU, GCM-encrypted under the factory default key (0x22 x16). 
           // We MUST extract it: the meter encrypts/decrypts all subsequent 
           // traffic with this key, and replies 0x40 forever if we keep using 
@@ -462,9 +462,9 @@ void NartisRfMeterComponent::handle_state_() {
           // the mode-6 plain reply.
           if (n < 0) {
             ESP_LOGW(TAG, "Pairing: SESSION_SETUP received but parse failed "
-                          "(n=%d, raw_type=0x%02X) — proceeding to mode-6 anyway", n, raw_type);
+                          "(n=%d, raw_type=0x%02X) - proceeding to mode-6 anyway", n, raw_type);
           } else {
-            ESP_LOGI(TAG, "Pairing: SESSION_SETUP received (0x53) — proceeding");
+            ESP_LOGI(TAG, "Pairing: SESSION_SETUP received (0x53) - proceeding");
             // The 0x53 carries the per-pairing data key the meter assigns this
             // CIU (= ASCII(meter_SN) + meter-chosen 4-byte suffix), GCM-encrypted
             // under the factory default key. Extract it and use it for all data:
@@ -480,10 +480,10 @@ void NartisRfMeterComponent::handle_state_() {
                 ESP_LOGI(TAG, "Pairing: installed meter-assigned data key (suffix %02X.%02X.%02X.%02X)",
                          session_key[12], session_key[13], session_key[14], session_key[15]);
               } else {
-                ESP_LOGW(TAG, "Pairing: 0x53 key serial mismatch — keeping configured key");
+                ESP_LOGW(TAG, "Pairing: 0x53 key serial mismatch - keeping configured key");
               }
             } else {
-              ESP_LOGW(TAG, "Pairing: could not extract data key from 0x53 — keeping configured key");
+              ESP_LOGW(TAG, "Pairing: could not extract data key from 0x53 - keeping configured key");
             }
           }
 
@@ -493,13 +493,13 @@ void NartisRfMeterComponent::handle_state_() {
           rx_parse_retries_ = 0;
           set_state_(State::PAIR_MODE6_TX);
         } else if (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK) {
-          // Some meters skip straight to keepalive/ack — treat as paired.
-          ESP_LOGI(TAG, "Pairing: meter ready (0x%02X) — paired", t);
+          // Some meters skip straight to keepalive/ack - treat as paired.
+          ESP_LOGI(TAG, "Pairing: meter ready (0x%02X) - paired", t);
           paired_ = true;
           rx_parse_retries_ = 0;
           set_state_(State::WAKE_BEACON_TX);
         } else if (try_rearm_rx_("Pairing ACK-wait", t, n)) {
-          // Noise frame — re-armed to listen once more within the same window.
+          // Noise frame - re-armed to listen once more within the same window.
         } else {
           ESP_LOGW(TAG, "Pairing: unexpected ACK response (type=0x%02X, n=%d)", t, n);
           rx_parse_retries_ = 0;
@@ -530,16 +530,16 @@ void NartisRfMeterComponent::handle_state_() {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
         // Expected: 0x5B keepalive. Accept type-byte match even on CRC fail.
-        // (0x40 short-ack also acceptable — some meters skip keepalive after mode-6.)
+        // (0x40 short-ack also acceptable - some meters skip keepalive after mode-6.)
         if (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK) {
           ESP_LOGI(TAG, "Pairing complete (meter replied 0x%02X). Now paired.", t);
           paired_ = true;
           rx_parse_retries_ = 0;
           set_state_(State::WAKE_BEACON_TX);
         } else if (try_rearm_rx_("Pairing keepalive", t, n)) {
-          // Noise frame — re-armed to listen once more within the same window.
+          // Noise frame - re-armed to listen once more within the same window.
         } else {
-          ESP_LOGW(TAG, "Pairing: gave up keepalive wait (type=0x%02X) — proceeding anyway", t);
+          ESP_LOGW(TAG, "Pairing: gave up keepalive wait (type=0x%02X) - proceeding anyway", t);
           paired_ = true;
           rx_parse_retries_ = 0;
           set_state_(State::WAKE_BEACON_TX);
@@ -547,7 +547,7 @@ void NartisRfMeterComponent::handle_state_() {
       } else if (status == RxStatus::ERROR) {
         // Keepalive is the meter's "I'm ready" nudge; if we miss it, still
         // consider pairing done and try the beacon poll (it has its own retry).
-        ESP_LOGW(TAG, "Pairing: no keepalive — proceeding to beacon anyway");
+        ESP_LOGW(TAG, "Pairing: no keepalive - proceeding to beacon anyway");
         paired_ = true;
         rx_parse_retries_ = 0;
         set_state_(State::WAKE_BEACON_TX);
@@ -578,9 +578,9 @@ void NartisRfMeterComponent::handle_state_() {
         // intact). On other type bytes, retry within the wait window before
         // giving up.
         if (t == RX_TYPE_SHORT_ACK) {
-          lock_channel_();  // first contact in an already-paired session — pin the channel
+          lock_channel_();  // first contact in an already-paired session - pin the channel
           if (payload_len < 0) {
-            ESP_LOGW(TAG, "Beacon response: 0x40 with parse fail (n=%d) — accepting", payload_len);
+            ESP_LOGW(TAG, "Beacon response: 0x40 with parse fail (n=%d) - accepting", payload_len);
           } else {
             ESP_LOGI(TAG, "Beacon response OK (type=0x40, payload=%d bytes)", payload_len);
             if (payload_len > 0) {
@@ -592,25 +592,25 @@ void NartisRfMeterComponent::handle_state_() {
         } else if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_) {
           rx_parse_retries_++;
           if (payload_len >= 0) {
-            // A valid, decoded frame — just not the 0x40 we expected (commonly
+            // A valid, decoded frame - just not the 0x40 we expected (commonly
             // 0x53 SESSION_SETUP: the meter wants to re-establish the session).
             // The meter already sent its reply and won't retransmit on its own,
-            // so re-arming RX is futile — re-send the beacon to prompt a fresh
+            // so re-arming RX is futile - re-send the beacon to prompt a fresh
             // reply within the same session.
-            ESP_LOGW(TAG, "Beacon response: unexpected frame (type=0x%02X, n=%d) — "
+            ESP_LOGW(TAG, "Beacon response: unexpected frame (type=0x%02X, n=%d) - "
                           "re-sending beacon (try %u/%u)",
                      t, payload_len, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
             set_state_(State::WAKE_BEACON_TX);
           } else if (esphome::millis() - state_entered_ms_ + 300 < rx_timeout_ms_) {
             // Parse failed (CRC/noise) and the RX window still has time: the
-            // meter's real reply may still be arriving — keep listening.
-            ESP_LOGW(TAG, "Beacon response: noise frame (type=0x%02X, n=%d) — "
+            // meter's real reply may still be arriving - keep listening.
+            ESP_LOGW(TAG, "Beacon response: noise frame (type=0x%02X, n=%d) - "
                           "re-arm RX (try %u/%u)",
                      t, payload_len, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
             start_rx_();
           } else {
-            // Window exhausted with nothing decodable — re-send the beacon.
-            ESP_LOGW(TAG, "Beacon response: no decodable reply (last type=0x%02X) — "
+            // Window exhausted with nothing decodable - re-send the beacon.
+            ESP_LOGW(TAG, "Beacon response: no decodable reply (last type=0x%02X) - "
                           "re-sending beacon (try %u/%u)",
                      t, rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
             set_state_(State::WAKE_BEACON_TX);
@@ -623,15 +623,15 @@ void NartisRfMeterComponent::handle_state_() {
         }
       } else if (status == RxStatus::ERROR) {
         // No reply at all within the RX window. Re-send the beacon a couple of
-        // times within the session before giving up — a single frame lost to RF
+        // times within the session before giving up - a single frame lost to RF
         // noise shouldn't fail the whole read cycle.
         if (rx_parse_retries_ < MAX_RX_PARSE_RETRIES_) {
           rx_parse_retries_++;
-          ESP_LOGW(TAG, "Beacon RX error/timeout — re-sending beacon (try %u/%u)",
+          ESP_LOGW(TAG, "Beacon RX error/timeout - re-sending beacon (try %u/%u)",
                    rx_parse_retries_, MAX_RX_PARSE_RETRIES_);
           set_state_(State::WAKE_BEACON_TX);
         } else {
-          ESP_LOGW(TAG, "Beacon RX error/timeout — gave up after %u attempts", rx_parse_retries_);
+          ESP_LOGW(TAG, "Beacon RX error/timeout - gave up after %u attempts", rx_parse_retries_);
           rx_parse_retries_ = 0;
           set_state_(State::ERROR_RECOVERY);
         }
@@ -659,7 +659,7 @@ void NartisRfMeterComponent::handle_state_() {
           set_state_(State::READ_POLL_BEACON_TX);
         } else if (raw_type == RX_TYPE_DATA) {
           // Meter answered the GET directly with data (no keepalive/beacon round-trip
-          // needed) — matches genuine captures.
+          // needed) - matches genuine captures.
           ESP_LOGV(TAG, "GET cycle: meter answered GET directly with data (0x43)");
           retry_count_ = 0;
           handle_data_response_();
@@ -668,11 +668,11 @@ void NartisRfMeterComponent::handle_state_() {
           set_state_(State::READ_REQUEST_TX);  // retry whole get-request
         }
       } else if (status == RxStatus::ERROR) {
-        ESP_LOGD(TAG, "GET cycle: no reply yet (start=%u, n=%u) — re-sending",
+        ESP_LOGD(TAG, "GET cycle: no reply yet (start=%u, n=%u) - re-sending",
                  batch_start_idx_, batch_count_);
         retry_count_++;
         if (retry_count_ >= GET_REPLY_MAX_RETRIES_) {
-          ESP_LOGW(TAG, "GET cycle: max retries — skipping batch (start=%u)", batch_start_idx_);
+          ESP_LOGW(TAG, "GET cycle: max retries - skipping batch (start=%u)", batch_start_idx_);
           skip_current_batch_();
           retry_count_ = 0;
           advance_after_get_();
@@ -684,14 +684,14 @@ void NartisRfMeterComponent::handle_state_() {
     }
 
     // Step 2: send BEACON to ask meter to deliver the data.
-    // Pace by ~1000 ms after RX of 0x5B — the meter waits
+    // Pace by ~1000 ms after RX of 0x5B - the meter waits
     // ~1.1 s between keepalive and the data-request BEACON. The meter uses
     // this time to query its internal OBIS registers and prep the response.
     // Sending the beacon faster than this makes the meter respond with 0x40
     // (cycle-close ack) instead of 0x43 (data response).
     case State::READ_POLL_BEACON_TX: {
       // Fast priming: the throwaway priming GET doesn't need the long data-prep
-      // pacing — poll quickly just to engage the meter. Real batches keep 5 s.
+      // pacing - poll quickly just to engage the meter. Real batches keep 5 s.
       const uint32_t req_beacon_delay =
           session_primed_ ? READ_POLL_BEACON_DELAY_MS_ : PRIMING_POLL_BEACON_DELAY_MS_;
       if (esphome::millis() - state_entered_ms_ < req_beacon_delay) {
@@ -713,7 +713,7 @@ void NartisRfMeterComponent::handle_state_() {
         if (raw_type == RX_TYPE_DATA) {
           handle_data_response_();
         } else {
-          ESP_LOGW(TAG, "GET cycle: unexpected data response (type=0x%02X) — retrying req-beacon",
+          ESP_LOGW(TAG, "GET cycle: unexpected data response (type=0x%02X) - retrying req-beacon",
                    raw_type);
           retry_count_++;
           // Priming only needs to engage the meter; it gets 0x40 no-data by
@@ -721,11 +721,11 @@ void NartisRfMeterComponent::handle_state_() {
           const uint8_t req_max = session_primed_ ? MAX_RETRIES_ : PRIMING_MAX_POLL_RETRIES_;
           if (retry_count_ >= req_max) {
             if (session_primed_) {
-              ESP_LOGW(TAG, "GET cycle: max retries on data response — skipping batch (start=%u)",
+              ESP_LOGW(TAG, "GET cycle: max retries on data response - skipping batch (start=%u)",
                        batch_start_idx_);
               batch_start_idx_ += batch_count_;
             } else {
-              ESP_LOGD(TAG, "GET cycle: priming engaged after %u req-beacon(s) — proceeding",
+              ESP_LOGD(TAG, "GET cycle: priming engaged after %u req-beacon(s) - proceeding",
                        retry_count_);
             }
             retry_count_ = 0;
@@ -735,7 +735,7 @@ void NartisRfMeterComponent::handle_state_() {
           }
         }
       } else if (status == RxStatus::ERROR) {
-        ESP_LOGD(TAG, "GET cycle: no data response yet (batch start=%u) — re-sending", batch_start_idx_);
+        ESP_LOGD(TAG, "GET cycle: no data response yet (batch start=%u) - re-sending", batch_start_idx_);
         retry_count_++;
         if (retry_count_ >= GET_REPLY_MAX_RETRIES_) {
           skip_current_batch_();
@@ -749,7 +749,7 @@ void NartisRfMeterComponent::handle_state_() {
     }
 
     // Step 4: send final BEACON acknowledging we got the data.
-    // Pace by ~4500 ms after RX of 0x43 — the meter waits
+    // Pace by ~4500 ms after RX of 0x43 - the meter waits
     // ~4200 ms here. Likely protocol pacing for the meter to settle its
     // state-machine before the cycle-close beacon arrives.
     case State::READ_CLOSE_BEACON_TX:
@@ -763,16 +763,16 @@ void NartisRfMeterComponent::handle_state_() {
       handle_wait_tx_done_(State::READ_WAIT_CLOSE_ACK);
       break;
 
-    // Step 5: meter replies with 0x40 short ack — cycle complete.
+    // Step 5: meter replies with 0x40 short ack - cycle complete.
     case State::READ_WAIT_CLOSE_ACK: {
       RxStatus status = poll_rx_();
       if (status == RxStatus::COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
-        ESP_LOGD(TAG, "GET cycle: final ack (type=0x%02X) — moving on", raw_type);
+        ESP_LOGD(TAG, "GET cycle: final ack (type=0x%02X) - moving on", raw_type);
         advance_after_get_();
       } else if (status == RxStatus::ERROR) {
-        // No final ack — data was already received and parsed; treat as soft success.
-        ESP_LOGD(TAG, "GET cycle: no final ack, but data was received — advancing anyway");
+        // No final ack - data was already received and parsed; treat as soft success.
+        ESP_LOGD(TAG, "GET cycle: no final ack, but data was received - advancing anyway");
         advance_after_get_();
       }
       break;
@@ -833,7 +833,7 @@ void NartisRfMeterComponent::handle_channel_select_() {
   // reply frequency. The meter
   // answers on a per-channel frequency (NARTIS_CUSTOM_CHANNELS) and the CIU
   // listens there; TX always stays on Ch0/433.82 (the meter's wake freq). So the
-  // advertised channel and our RX channel MUST be the SAME index — then the meter
+  // advertised channel and our RX channel MUST be the SAME index - then the meter
   // replies exactly where we listen. We default to ch2 (434.26, proven), and the
   // hop fallback moves advertised+RX together (hop_channel_).
   channel_locked_ = false;
@@ -878,7 +878,7 @@ bool NartisRfMeterComponent::hop_channel_() {
   hal_.set_frequency_channel(active_channel_);
   rf_.set_channel_quality(active_channel_, rssi_readings_[active_channel_]);
   channel_hop_count_++;
-  ESP_LOGI(TAG, "No reply — hopping advertise+RX to channel %u (%.3f MHz), hop %u/%u",
+  ESP_LOGI(TAG, "No reply - hopping advertise+RX to channel %u (%.3f MHz), hop %u/%u",
            active_channel_, active_rx_freq_mhz_(), channel_hop_count_, MAX_CHANNEL_HOPS_);
   return true;
 }
@@ -888,7 +888,7 @@ void NartisRfMeterComponent::lock_channel_() {
     return;
   }
   channel_locked_ = true;
-  ESP_LOGI(TAG, "Meter replied on channel %u (%.3f MHz) — locking it for this session",
+  ESP_LOGI(TAG, "Meter replied on channel %u (%.3f MHz) - locking it for this session",
            active_channel_, active_rx_freq_mhz_());
 }
 
@@ -901,15 +901,15 @@ float NartisRfMeterComponent::active_rx_freq_mhz_() const {
 }
 
 /*
- * Pairing handshake — first-contact sequence with the meter:
+ * Pairing handshake - first-contact sequence with the meter:
  *
- *   CIU → meter : plain mode-1 probe, payload = "0" + 12-digit meter serial
- *   meter → CIU : 0x06 (presence ack)
- *   CIU → meter : encrypted mode-2 ACK, payload = beacon template
- *   meter → CIU : 0x53 SESSION_SETUP (key blob — not needed by us)
- *   CIU → meter : plain mode-6, payload = 12-digit meter serial
- *   meter → CIU : 0x5B keepalive
- *   → normal beacon/GET poll begins (AES key = meter_serial || salt)
+ *   CIU -> meter : plain mode-1 probe, payload = "0" + 12-digit meter serial
+ *   meter -> CIU : 0x06 (presence ack)
+ *   CIU -> meter : encrypted mode-2 ACK, payload = beacon template
+ *   meter -> CIU : 0x53 SESSION_SETUP (key blob - not needed by us)
+ *   CIU -> meter : plain mode-6, payload = 12-digit meter serial
+ *   meter -> CIU : 0x5B keepalive
+ *   -> normal beacon/GET poll begins (AES key = meter_serial || salt)
  */
 
 size_t NartisRfMeterComponent::build_pair_probe_payload_(uint8_t *out, size_t max) {
@@ -943,7 +943,7 @@ void NartisRfMeterComponent::handle_pair_probe_tx_() {
   }
   // Retry-after-timeout gate (2.3 s) combines with the preceding TX (~200 ms)
   // and RX_TIMEOUT_MS_ (3 s) for a ~5.5 s retry interval, matching the meter.
-  // First entry from CHANNEL_SELECT is not gated — the RSSI scan already paced it.
+  // First entry from CHANNEL_SELECT is not gated - the RSSI scan already paced it.
   if (pair_retry_ > 0 &&
       esphome::millis() - state_entered_ms_ < PAIR_RETRY_DELAY_MS_) {
     return;
@@ -980,8 +980,8 @@ void NartisRfMeterComponent::handle_pair_ack_tx_() {
     abort_to_idle_("Pairing: no SESSION_SETUP after ACKs");
     return;
   }
-  // First attempt (after RX 0x06): real CIU fires 637 ms later — short settle gate.
-  // Retries (after RX timeout): same 2.3 s gate as probe → ~5.5 s retry interval.
+  // First attempt (after RX 0x06): real CIU fires 637 ms later - short settle gate.
+  // Retries (after RX timeout): same 2.3 s gate as probe -> ~5.5 s retry interval.
   uint32_t gate = (pair_retry_ == 0) ? PAIR_POST_PROBE_DELAY_MS_ : PAIR_RETRY_DELAY_MS_;
   if (esphome::millis() - state_entered_ms_ < gate) {
     return;
@@ -1006,7 +1006,7 @@ void NartisRfMeterComponent::handle_pair_ack_tx_() {
 }
 
 void NartisRfMeterComponent::handle_pair_mode6_tx_() {
-  // Pace by ~5.5 s after the meter's 0x53 SESSION_SETUP — the real CIU waits
+  // Pace by ~5.5 s after the meter's 0x53 SESSION_SETUP - the real CIU waits
   // 5629 ms before sending mode-6 (meter is doing key-install internally).
   if (esphome::millis() - state_entered_ms_ < PAIR_POST_SESSION_DELAY_MS_) {
     return;
@@ -1020,7 +1020,7 @@ void NartisRfMeterComponent::handle_pair_mode6_tx_() {
     set_state_(State::ERROR_RECOVERY);
     return;
   }
-  // Mode-6 frame (flags 0x00, marker 0x8A). ★ Sequence sourced from the
+  // Mode-6 frame (flags 0x00, marker 0x8A). * Sequence sourced from the
   // beacon counter, NOT the data counter. The real CIU sends seq=01 here even
   // though the data counter is at 5. Using the wrong counter = meter rejects
   // the handshake-confirm and stays in SESSION_SETUP retransmit loop.
@@ -1065,9 +1065,9 @@ void NartisRfMeterComponent::handle_beacon_tx_() {
   }
 
   // Pick the right "wait TX done" state based on which beacon we're sending:
-  //   WAKE_BEACON_TX        — session wake-up beacon (→ wait 0x40)
-  //   READ_POLL_BEACON_TX   — in-cycle beacon fetching data (→ wait 0x43)
-  //   READ_CLOSE_BEACON_TX  — in-cycle beacon closing the read (→ wait 0x40)
+  //   WAKE_BEACON_TX        - session wake-up beacon (-> wait 0x40)
+  //   READ_POLL_BEACON_TX   - in-cycle beacon fetching data (-> wait 0x43)
+  //   READ_CLOSE_BEACON_TX  - in-cycle beacon closing the read (-> wait 0x40)
   switch (state_) {
     case State::READ_POLL_BEACON_TX:
       set_state_(State::READ_POLL_BEACON_WAIT_TX_DONE);
@@ -1101,7 +1101,7 @@ void NartisRfMeterComponent::handle_wait_tx_done_(State next_state) {
 
 void NartisRfMeterComponent::handle_get_tx_() {
   // If the session is primed AND we've walked past every user sensor, we're
-  // done — publish and return to IDLE.
+  // done - publish and return to IDLE.
   if (session_primed_ && batch_start_idx_ >= sensors_.size()) {
     set_state_(State::PUBLISH);
     return;
@@ -1111,20 +1111,20 @@ void NartisRfMeterComponent::handle_get_tx_() {
   // Two phases:
   //   Phase 0 (!session_primed_): get-request-NORMAL (c0 01, single OBIS).
   //     The freshly-paired meter requires this opener before it engages the
-  //     with-list flow — sending a with-list first leaves it silent (matches
-  //     the real CIU). Drives the same keepalive→beacon→data cycle,
+  //     with-list flow - sending a with-list first leaves it silent (matches
+  //     the real CIU). Drives the same keepalive->beacon->data cycle,
   //     so it reuses the GET states below.
   //   Phase 1: user-defined sensors in batches of user_batch_size_ (YAML
-  //     `batch_size`). No vendor-init read — we only request configured sensors.
+  //     `batch_size`). No vendor-init read - we only request configured sensors.
   uint8_t apdu[4 + 10 * DlmsClient::MAX_LIST_ATTRS];
   size_t apdu_len;
 
   if (!session_primed_) {
     static constexpr ObisCode VENDOR_OBIS{{0x00, 0x00, 0x60, 0x80, 0x03, 0xFF}};
     apdu_len = dlms_.build_get_request_normal(apdu, sizeof(apdu), VENDOR_OBIS, 1, 2);
-    batch_count_ = 0;  // priming read — store nothing
+    batch_count_ = 0;  // priming read - store nothing
     ESP_LOGI(TAG, "GET priming: get-request-normal (c0 01, OBIS 0-0:96.128.3.255) "
-                  "— meter requires this before the with-list flow");
+                  "- meter requires this before the with-list flow");
   } else {
     // User-defined sensors, up to user_batch_size_ per batch.
     DlmsClient::AttrSpec specs[DlmsClient::MAX_LIST_ATTRS];
@@ -1135,7 +1135,7 @@ void NartisRfMeterComponent::handle_get_tx_() {
       spec_count++;
     }
     if (spec_count == 0) {
-      // No more sensors — publish and finish the cycle.
+      // No more sensors - publish and finish the cycle.
       set_state_(State::PUBLISH);
       return;
     }
@@ -1176,7 +1176,7 @@ bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len)
   //   [6..7] length   = APDU length BE
   //   [8..]  DLMS APDU
   // The whole 8+APDU plaintext gets AES-GCM-encrypted inside the 0x44 frame.
-  // Sending it plain (mode-1 / 0x46) makes the meter silently drop it —
+  // Sending it plain (mode-1 / 0x46) makes the meter silently drop it -
   // post-pairing the meter only accepts encrypted reads. With up to 10 attrs
   // the APDU reaches 4 + 10*10 = 104 bytes, so 128 is safe.
   uint8_t plain[128];
@@ -1196,7 +1196,7 @@ bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len)
            (int) plain_len, (int) apdu_len,
            format_hex_pretty(plain, plain_len).c_str());
 
-  // Mode-2 encrypted ACK frame — uses data_seq_ (same counter as probe/ACK).
+  // Mode-2 encrypted ACK frame - uses data_seq_ (same counter as probe/ACK).
   size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
                                      RfFrameType::ACK, data_seq_++,
                                      plain, plain_len);
@@ -1209,7 +1209,7 @@ bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len)
 void NartisRfMeterComponent::handle_data_response_() {
   // Shared 0x43 data-response handling for both READ_WAIT_REQUEST_ACK (meter
   // answered the GET directly) and READ_WAIT_DATA. Parse the response; on
-  // success advance to the closing beacon — or straight to the next batch when
+  // success advance to the closing beacon - or straight to the next batch when
   // skip_fin_beacons_ is set. On repeated parse failure skip the batch;
   // otherwise re-send the current GET.
   if (handle_get_response_()) {
@@ -1220,7 +1220,7 @@ void NartisRfMeterComponent::handle_data_response_() {
       set_state_(State::READ_CLOSE_BEACON_TX);  // closing beacon
     }
   } else if (++resp_fail_retries_ >= MAX_RETRIES_) {
-    ESP_LOGW(TAG, "GET cycle: response unparseable %ux — skipping batch (start=%u)",
+    ESP_LOGW(TAG, "GET cycle: response unparseable %ux - skipping batch (start=%u)",
              resp_fail_retries_, batch_start_idx_);
     resp_fail_retries_ = 0;
     skip_current_batch_();
@@ -1254,8 +1254,8 @@ bool NartisRfMeterComponent::handle_get_response_() {
   // For a 0x43 the parse_frame payload is still the nested-encrypted envelope
   // (addr-echo + 01 29 len 00 + counter + ciphertext + tag). Decrypt the inner
   // DLMS APDU with the REPLAY-CHECKED parser (not the diagnostic peek): it
-  // rejects any frame whose nested counter is <= the last one we accepted —
-  // i.e. a re-delivered / buffered / lagged 0x43 — and bumps the high-water
+  // rejects any frame whose nested counter is <= the last one we accepted -
+  // i.e. a re-delivered / buffered / lagged 0x43 - and bumps the high-water
   // mark on accept. This is the definitive "fresh reply for us, not a stale
   // one" guard: it catches the meter re-handing the previous batch's buffered
   // response (which would otherwise pass the form + count guards and store the
@@ -1271,7 +1271,7 @@ bool NartisRfMeterComponent::handle_get_response_() {
                                        dlms_buf, sizeof(rx_dlms_buf_));
     if (n == static_cast<int>(RfDataLayer::ParseResult::ERR_REPLAY)) {
       ESP_LOGW(TAG, "0x43 rejected: stale/re-delivered frame (nested counter not newer than "
-                    "last accepted) — ignoring so the batch re-sends for a fresh reply");
+                    "last accepted) - ignoring so the batch re-sends for a fresh reply");
       return false;
     }
     if (n <= 0) {
@@ -1309,16 +1309,16 @@ bool NartisRfMeterComponent::handle_get_response_() {
   }
 
   if (!session_primed_) {
-    // Priming normal-get response — discard, don't touch batch state.
-    ESP_LOGD(TAG, "Priming response: parsed %u result slots — discarding", got_count);
+    // Priming normal-get response - discard, don't touch batch state.
+    ESP_LOGD(TAG, "Priming response: parsed %u result slots - discarding", got_count);
   } else {
     // Guard: a real with-list answer returns exactly one result per requested
     // attribute (access-errors included as invalid slots). A count mismatch
     // means this frame isn't the answer to the batch we just sent (e.g. a
-    // stale/duplicate response) — reject so the caller re-sends rather than
+    // stale/duplicate response) - reject so the caller re-sends rather than
     // storing values into the wrong sensor slots.
     if (got_count != batch_count_) {
-      ESP_LOGW(TAG, "GET response: count mismatch (got %u, expected %u) — "
+      ESP_LOGW(TAG, "GET response: count mismatch (got %u, expected %u) - "
                     "ignoring mismatched/stale response", got_count, batch_count_);
       return false;
     }
@@ -1351,7 +1351,7 @@ void NartisRfMeterComponent::skip_current_batch_() {
 void NartisRfMeterComponent::advance_after_get_() {
   if (!session_primed_) {
     session_primed_ = true;
-    ESP_LOGD(TAG, "Session primed — proceeding to with-list reads");
+    ESP_LOGD(TAG, "Session primed - proceeding to with-list reads");
     save_pairing_state_();
     set_state_(State::READ_REQUEST_TX);
     return;
@@ -1402,7 +1402,7 @@ void NartisRfMeterComponent::handle_publish_() {
   ESP_LOGI(TAG, "Session with meter: %.1f s (%u ms)", session_ms / 1000.0f, (unsigned) session_ms);
 
   // Comms with the meter are finished and every TX/RX counter has advanced.
-  // Persist them NOW — before publishing — and force an immediate flush to NVS.
+  // Persist them NOW - before publishing - and force an immediate flush to NVS.
   // ESPHome's preferences layer normally defers the flash write up to
   // flash_write_interval (default 60 s); without the forced sync an unexpected
   // reboot during/after publish would lose this cycle's counter advance and
@@ -1431,7 +1431,7 @@ void NartisRfMeterComponent::handle_publish_() {
     if (entry.text_sensor) {
       char buf[64];
       DlmsClient::data_to_string(dtype, raw, rlen, buf, sizeof(buf));
-      char utf8[sizeof(buf) * 3];  // CP1251→UTF-8 expands each byte up to 3x
+      char utf8[sizeof(buf) * 3];  // CP1251->UTF-8 expands each byte up to 3x
       cp1251_to_utf8_(utf8, buf);
       entry.text_sensor->publish_state(utf8);
     }
@@ -1443,7 +1443,7 @@ void NartisRfMeterComponent::handle_publish_() {
 }
 
 void NartisRfMeterComponent::handle_error_recovery_() {
-  ESP_LOGW(TAG, "Error recovery — resetting radio");
+  ESP_LOGW(TAG, "Error recovery - resetting radio");
   finish_rx_();
   hal_.go_standby();
   hal_.clear_interrupt_flags();
@@ -1459,14 +1459,14 @@ bool NartisRfMeterComponent::transmit_frame_(RfFrameType type,
                                              const uint8_t *frame, size_t len) {
   ESP_LOGD(TAG, "TX frame (%d bytes, type=0x%02X):", (int) len, static_cast<uint8_t>(type));
   ESP_LOGV(TAG, "TX: %s", format_hex_pretty(frame, len).c_str());
-  // Use chunked TX for all frames — handles packets > 64 bytes
+  // Use chunked TX for all frames - handles packets > 64 bytes
   // (AARQ can be ~80-100B after CRC framing, beacons ~60-70B)
   return hal_.transmit_chunked(frame, len);
 }
 
 void NartisRfMeterComponent::derive_rf_address_() {
   // Explicit full CIU address wins (8 bytes as 16 hex chars). Use this to
-  // impersonate the exact CIU a meter is already paired to — a meter typically
+  // impersonate the exact CIU a meter is already paired to - a meter typically
   // only answers its paired CIU's address, so a derived/MAC address is ignored.
   if (ciu_address_.size() == 16) {
     uint8_t b[8];
@@ -1488,7 +1488,7 @@ void NartisRfMeterComponent::derive_rf_address_() {
       ESP_LOGI(TAG, "Using explicit CIU address: %s", format_hex_pretty(out, 8).c_str());
       return;
     }
-    ESP_LOGW(TAG, "Invalid ciu_address '%s' — falling back to derivation", ciu_address_.c_str());
+    ESP_LOGW(TAG, "Invalid ciu_address '%s' - falling back to derivation", ciu_address_.c_str());
   }
 
   uint8_t mac[6];
@@ -1517,10 +1517,10 @@ void NartisRfMeterComponent::derive_rf_address_() {
 size_t NartisRfMeterComponent::build_beacon_payload_(uint8_t *out, size_t max) {
   if (max < 29) return 0;
 
-  // 29-byte beacon payload — a fixed Nartis TLV template with a 6-byte RTC
+  // 29-byte beacon payload - a fixed Nartis TLV template with a 6-byte RTC
   // timestamp patched in. Reconstructed byte-for-byte from the meter's beacon
   // address builder. The template is a fixed TLV layout, the "1234" constant,
-  // and two hard-coded bytes (0x07,0x04) — NOT from the RF address (the earlier
+  // and two hard-coded bytes (0x07,0x04) - NOT from the RF address (the earlier
   // implementation's mistake).
   //
   //   [0..3]   0d fd 0d 04        TLV: tag 0x0dfd, type 0x0d, len 4
@@ -1550,7 +1550,7 @@ size_t NartisRfMeterComponent::build_beacon_payload_(uint8_t *out, size_t max) {
 
 void NartisRfMeterComponent::build_rtc_timestamp_(uint8_t *out) {
   // Our assumption:
-  // The meter only requires a LIVE, ADVANCING clock here — not the real
+  // The meter only requires a LIVE, ADVANCING clock here - not the real
   // wall-clock. Confirmed against real-CIU beacons: the field ticks
   // forward each beacon; a frozen/zero value makes the meter keepalive the
   // request but refuse the data (0x40, never 0x43).
@@ -1573,10 +1573,10 @@ void NartisRfMeterComponent::build_rtc_timestamp_(uint8_t *out) {
   uint8_t hr  = now.hour;
   uint8_t mn  = now.minute;
   uint8_t sec = now.second;
-  // The meter's day-of-week is ISO (Mon=1 … Sun=7). ESPHome day_of_week is 1=Sun … 7=Sat.
+  // The meter's day-of-week is ISO (Mon=1 ... Sun=7). ESPHome day_of_week is 1=Sun ... 7=Sat.
   uint8_t dow = (now.day_of_week == 1) ? 7 : static_cast<uint8_t>(now.day_of_week - 1);
 
-  // 6-byte bit-packing — verified byte-for-byte against real-CIU beacons and
+  // 6-byte bit-packing - verified byte-for-byte against real-CIU beacons and
   // the meter's RTC timestamp packing. Beacon payload offset [16..21]:
   //   [0] seconds (6b)
   //   [1] minutes (6b)
@@ -1601,14 +1601,14 @@ void NartisRfMeterComponent::start_rx_() {
 
   // CRITICAL: the preceding TX left the merged FIFO in TX direction with the
   // 64-byte beacon still "occupying" it. Switch the merged FIFO back to RX
-  // direction FIRST, then fully reset it (clear + RESTORE pointers) — otherwise
+  // direction FIRST, then fully reset it (clear + RESTORE pointers) - otherwise
   // RX starts against a FIFO that already reads full/overflowed (FIFO_FLAG=0xFF)
-  // and we drain stale garbage. Order matters: direction → restore → clear.
+  // and we drain stale garbage. Order matters: direction -> restore -> clear.
   hal_.prepare_rx_session();   // RX FIFO direction + SDIO input
   hal_.reset_rx_fifo_full();   // FIFO_RESTORE + clear RX/TX
   hal_.clear_interrupt_flags();
 
-  // Route the INT line → RX_FIFO_TH (the meter's RX mechanism). The pin
+  // Route the INT line -> RX_FIFO_TH (the meter's RX mechanism). The pin
   // goes HIGH while >= FIFO_TH_VALUE bytes await in the RX FIFO; we drain
   // threshold chunks on that, and read the trailing sub-threshold bytes by
   // frame length. (TX left it on TX_FIFO_TH; this restores it for RX.)
@@ -1620,7 +1620,7 @@ void NartisRfMeterComponent::start_rx_() {
   rx_tail_wait_ms_ = 0;
   rx_drain_stall_ms_ = 0;
 
-  // Enter RX mode: STBY → RFS → RX
+  // Enter RX mode: STBY -> RFS -> RX
   hal_.write_reg(REG_MODE_CTL, GO_RFS);
   hal_.wait_for_state(STA_RFS);
   hal_.write_reg(REG_MODE_CTL, GO_RX);
@@ -1681,9 +1681,9 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
       // A full chunk (>= FIFO_TH_VALUE) is still owed but the chunk-drain has
       // found nothing for RX_DRAIN_STALL_MS_: the chip finished receiving and
       // de-asserted RX_FIFO_TH with the remainder still unread (the 45/66,
-      // 75/93 stall). Those bytes are sitting in the 64 B FIFO — read them
+      // 75/93 stall). Those bytes are sitting in the 64 B FIFO - read them
       // directly by length. CRC downstream rejects it if sync was truly lost.
-      ESP_LOGD(TAG, "RX drain stalled at %d/%d — reading %d remaining from FIFO",
+      ESP_LOGD(TAG, "RX drain stalled at %d/%d - reading %d remaining from FIFO",
                (int) rx_accum_len_, (int) rx_expected_len_, (int) remaining);
       hal_.read_fifo(rx_accum_buf_ + rx_accum_len_, remaining);
       rx_accum_len_ += remaining;
@@ -1698,7 +1698,7 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
     // Peek-decode for the log: if the frame contains an encrypted body, run
     // the parser non-destructively and dump the decrypted plaintext. This is
-    // diagnostic only — the calling state handler re-parses separately. We
+    // diagnostic only - the calling state handler re-parses separately. We
     // accept any parse_frame result here (CRC fail, decrypt fail, etc.) and
     // just print what came out.
     if (rx_accum_len_ > 1) {
@@ -1710,10 +1710,10 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
       if (peek_len > 0) {
         ESP_LOGV(TAG, "RX decoded (type=0x%02X, %d B plain%s): %s",
                  raw_type, peek_len,
-                 (raw_type == RX_TYPE_DATA || raw_type == RX_TYPE_SESSION_SETUP) ? " — nested-decrypted" : "",
+                 (raw_type == RX_TYPE_DATA || raw_type == RX_TYPE_SESSION_SETUP) ? " - nested-decrypted" : "",
                  format_hex_pretty(peek_buf, peek_len).c_str());
         // Third line: for 0x43 the outer payload still wraps a nested-encrypted
-        // DLMS APDU — decrypt it (non-mutating peek) and dump the inner plaintext.
+        // DLMS APDU - decrypt it (non-mutating peek) and dump the inner plaintext.
         if (raw_type == RX_TYPE_DATA) {
           uint8_t *const dlms_buf = rx_dlms_buf_;
           int dlms_len = rf_.peek_nested_plain(peek_buf, peek_len, dlms_buf, sizeof(rx_dlms_buf_));
@@ -1741,7 +1741,7 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
 
   // Check timeout. In the steady-state GET reply waits, use a short timeout so a
   // request dropped in the meter's post-TX deaf window re-sends fast instead of
-  // stalling 3 s — but only until the first byte lands; once a reply has started
+  // stalling 3 s - but only until the first byte lands; once a reply has started
   // the full RX_TIMEOUT_MS_ governs completion so a large frame isn't aborted.
   uint32_t reply_timeout = rx_timeout_ms_;
   if (rx_accum_len_ == 0 &&

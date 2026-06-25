@@ -5,7 +5,7 @@
  *
  * Frame structure:
  *
- *   TX (CIU→meter) layout:
+ *   TX (CIU->meter) layout:
  *     [0]     length-1
  *     [1]     flags (0x44 ACK | 0x46 DATA | 0x08 BEACON | 0x00 PLAIN)
  *     [2..9]  CIU address (CD 2C + hash[4] + group + type)
@@ -19,14 +19,14 @@
  *     [17..20] frame_counter (BE u32)
  *     [21..20+L]      ciphertext
  *     [21+L..32+L]    AES-GCM tag (12 bytes)
- *     trailing CRC(s): single if total ≤ 128, dual otherwise (CRC1 at 0x7E)
+ *     trailing CRC(s): single if total <= 128, dual otherwise (CRC1 at 0x7E)
  *
- *   RX (meter→CIU) plain layout:
+ *   RX (meter->CIU) plain layout:
  *     [0]     length-1
  *     [1]     RX frame_type (0x40 | 0x43 | 0x53 | 0x5B | 0x06)
  *     [2..9]  meter address
  *     [10]    passthrough byte
- *     [11..12] mode flags (both 0 ⇒ plain)
+ *     [11..12] mode flags (both 0 => plain)
  *     [13..end-2-CRC] payload
  *     trailing CRC(s): same rule as TX
  *
@@ -67,7 +67,7 @@ class RfDataLayer {
   /// plaintext is [slot][len=0x10][16-byte key = ASCII(meter_SN)[12] +
   /// meter-assigned 4-byte suffix]. Returns true and fills `out_key` on a
   /// well-formed blob (len byte == 0x10). CTR is symmetric so no separate
-  /// tag check is needed — the caller validates the embedded serial.
+  /// tag check is needed - the caller validates the embedded serial.
   bool extract_session_key(const uint8_t *payload, size_t len, uint8_t out_key[AES_KEY_SIZE]) const;
 
   /// Set the channel index (0..3) and a representative RSSI (dBm) for
@@ -91,7 +91,7 @@ class RfDataLayer {
                      RfFrameType type, uint8_t sequence,
                      const uint8_t *payload, size_t payload_len);
 
-  /// Legacy-compat overload (src_id is ignored — used to be written at the wrong offset).
+  /// Legacy-compat overload (src_id is ignored - used to be written at the wrong offset).
   size_t build_frame(uint8_t *out, size_t out_max,
                      RfFrameType type, uint8_t /*src_id*/, uint8_t sequence,
                      const uint8_t *payload, size_t payload_len) {
@@ -116,7 +116,7 @@ class RfDataLayer {
   /// AND rejects replayed counters (counter must be > last_rx_counter_).
   ///
   /// On RX type 0x43 plain frames, the payload contains a NESTED encrypted
-  /// inner frame; this function returns the plain transport payload as-is —
+  /// inner frame; this function returns the plain transport payload as-is -
   /// caller may then call parse_nested_encrypted() on it.
   ///
   /// Returns payload length on success, or a negative ParseResult value
@@ -149,7 +149,7 @@ class RfDataLayer {
 
   /// TX-side counter (used in the AES-GCM nonce; auto-incremented per encrypted TX).
   uint32_t get_frame_counter() const { return frame_counter_; }
-  /// Set the TX counter — caller should call on startup with NVS-persisted value
+  /// Set the TX counter - caller should call on startup with NVS-persisted value
   /// + safety margin (e.g. +16) to avoid replay rejection by the meter after reboot.
   void set_frame_counter(uint32_t counter) { frame_counter_ = counter; }
   void increment_frame_counter() { frame_counter_++; }
@@ -164,7 +164,7 @@ class RfDataLayer {
   void reset_rx_counter() { last_rx_counter_ = 0; }
 
   /// Nested-frame replay-protection counter (separate from top-level encrypted
-  /// counter — applies to inner encrypted frames inside RX 0x43 envelopes).
+  /// counter - applies to inner encrypted frames inside RX 0x43 envelopes).
   uint32_t get_last_nested_rx_counter() const { return last_nested_rx_counter_; }
   void set_last_nested_rx_counter(uint32_t v) { last_nested_rx_counter_ = v; }
 
@@ -211,7 +211,7 @@ class RfDataLayer {
   uint32_t last_rx_counter_{0};
   uint32_t last_nested_rx_counter_{0};
   // The meter tracks last-sent sequence so the AES counter
-  // is bumped only when the sequence byte changes — beacons retransmitted with
+  // is bumped only when the sequence byte changes - beacons retransmitted with
   // identical content reuse the previous counter.
   uint8_t  last_tx_sequence_{0};
   bool     has_sent_first_tx_{false};

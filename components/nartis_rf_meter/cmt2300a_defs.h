@@ -38,7 +38,7 @@ static constexpr uint8_t TX_BANK_SIZE = 11;
 static constexpr uint8_t TOTAL_CONFIG_SIZE = 96;
 
 /* ================================================================
- * Register Addresses — Configuration Banks (0x00–0x5F)
+ * Register Addresses - Configuration Banks (0x00-0x5F)
  * ================================================================ */
 
 /* CMT Bank */
@@ -150,7 +150,7 @@ static constexpr uint8_t REG_TX10 = 0x5E;
 static constexpr uint8_t REG_LBD = 0x5F;
 
 /* ================================================================
- * Register Addresses — Control Banks (0x60–0x71)
+ * Register Addresses - Control Banks (0x60-0x71)
  * ================================================================ */
 
 /* Control1 Bank */
@@ -180,7 +180,7 @@ static constexpr uint8_t REG_SOFT_RST = 0x7F;
 static constexpr uint8_t SOFT_RST_VALUE = 0xFF;
 
 /* ================================================================
- * Chip Mode — GO commands (write to REG_MODE_CTL)
+ * Chip Mode - GO commands (write to REG_MODE_CTL)
  * ================================================================ */
 static constexpr uint8_t GO_EEPROM = 0x01;
 static constexpr uint8_t GO_STBY = 0x02;
@@ -192,7 +192,7 @@ static constexpr uint8_t GO_TX = 0x40;
 static constexpr uint8_t GO_SWITCH = 0x80;
 
 /* ================================================================
- * Chip Status — read from REG_MODE_STA
+ * Chip Status - read from REG_MODE_STA
  * ================================================================ */
 static constexpr uint8_t MASK_CHIP_MODE_STA = 0x0F;
 static constexpr uint8_t MASK_CFG_RETAIN = 0x10;
@@ -266,11 +266,11 @@ static constexpr uint8_t MASK_FIFO_RX_TX_SEL = 0x04;
 static constexpr uint8_t MASK_SPI_FIFO_RD_WR_SEL = 0x01;
 
 /* ================================================================
- * IO_SEL Register (REG_IO_SEL = 0x65) — GPIO function mapping
+ * IO_SEL Register (REG_IO_SEL = 0x65) - GPIO function mapping
  * ================================================================ */
 static constexpr uint8_t MASK_GPIO3_SEL = 0x30;
 
-/* GPIO3 options (NOTE: GPIO3 cannot output INT1 — only INT2/CLKO/DOUT/DCLK).
+/* GPIO3 options (NOTE: GPIO3 cannot output INT1 - only INT2/CLKO/DOUT/DCLK).
  * Our board wires only the chip's GPIO3 pad to the ESP32, so only GPIO3 is
  * muxed (to INT2); the GPIO1/GPIO2 select fields are left at POR defaults. */
 static constexpr uint8_t GPIO3_SEL_CLKO = 0x00;
@@ -279,7 +279,7 @@ static constexpr uint8_t GPIO3_SEL_INT2 = 0x20;
 static constexpr uint8_t GPIO3_SEL_DCLK = 0x30;
 
 /* ================================================================
- * INT1_CTL / INT2_CTL — Interrupt source selection
+ * INT1_CTL / INT2_CTL - Interrupt source selection
  * ================================================================ */
 static constexpr uint8_t MASK_INT1_SEL = 0x1F;
 static constexpr uint8_t MASK_INT2_SEL = 0x1F;
@@ -325,11 +325,11 @@ static constexpr uint8_t INT_EN_CRC_OK = 0x02;
 static constexpr uint8_t INT_EN_PKT_DONE = 0x01;
 
 /* ================================================================
- * SYS11 Register (REG_SYS11 = 0x16) — FIFO merge
+ * SYS11 Register (REG_SYS11 = 0x16) - FIFO merge
  * ================================================================ */
 static constexpr uint8_t MASK_FIFO_MERGE_CFG = 0xE0;  // top 3 bits preserved
 
-/* PKT29 Register (REG_PKT29 = 0x54) — FIFO threshold */
+/* PKT29 Register (REG_PKT29 = 0x54) - FIFO threshold */
 static constexpr uint8_t MASK_FIFO_TH = 0x7F;
 static constexpr uint8_t MASK_FIFO_AUTO_RES_EN = 0x80;
 
@@ -382,13 +382,13 @@ static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
  *
  * Opt-in via YAML `use_alternative_channels: true`. This is the MEASURED
  * meter reply-frequency table, NOT a guess. The advertised channel index in
- * frame[12] bits 7:6 COMMANDS the meter's reply frequency — the meter answers
+ * frame[12] bits 7:6 COMMANDS the meter's reply frequency - the meter answers
  * on a per-channel frequency and the CIU listens there (TX always stays on
  * Ch0/433.82, the meter's wake freq).
  *
  * The meter replies on the advertised channel's STANDARD TX-half frequency:
  *   ch0->433.82  ch1->433.30  ch2->434.26  ch3->434.70 MHz.
- * The earlier "±1.7 MHz wander" was pure SDR ALIASING (e.g. ch1 433.30 ->
+ * The earlier "+/-1.7 MHz wander" was pure SDR ALIASING (e.g. ch1 433.30 ->
  * 435.35 at 434.4/2.048).
  *
  * IMPORTANT (low-IF receiver): the CMT2300A RX register sets the LO; the
@@ -410,8 +410,8 @@ static constexpr uint8_t NARTIS_CUSTOM_CHANNELS[4][8] = {
 // clang-format on
 
 /* Runtime override values (applied after bank writes) */
-static constexpr uint8_t FIFO_MERGE_VALUE = 0x12;   // REG_SYS11: (reg & 0xE0) | 0x12 — merge TX+RX = 64B
-static constexpr uint8_t FIFO_TH_VALUE = 0x0F;      // REG_PKT29: (reg & 0xE0) | 0x0F — threshold = 15 bytes
+static constexpr uint8_t FIFO_MERGE_VALUE = 0x12;   // REG_SYS11: (reg & 0xE0) | 0x12 - merge TX+RX = 64B
+static constexpr uint8_t FIFO_TH_VALUE = 0x0F;      // REG_PKT29: (reg & 0xE0) | 0x0F - threshold = 15 bytes
 static constexpr uint8_t TX_REFILL_CHUNK = 15;       // Refill 15 bytes per TX_FIFO_TH event
 
 /* Number of frequency channels */
@@ -430,7 +430,7 @@ static constexpr uint32_t STATE_POLL_INTERVAL_US = 100;
  * 1 initial warmup sample + RSSI_SCAN_LOOP_SAMPLES scored samples per channel,
  * RSSI_SCAN_SAMPLE_DELAY_US between each read.
  * Score is the trimmed mean: (sum - max - min) / (LOOP_SAMPLES - 2).
- * No RSSI threshold is used — channels are only ranked.
+ * No RSSI threshold is used - channels are only ranked.
  * ================================================================ */
 static constexpr uint8_t  RSSI_SCAN_LOOP_SAMPLES = 6;
 static constexpr uint32_t RSSI_SCAN_SAMPLE_DELAY_US = 2000;

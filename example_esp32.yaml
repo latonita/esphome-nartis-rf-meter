@@ -16,7 +16,7 @@ logger:
 # be raised so long DLMS frame dumps are not truncated mid-line. Lower to DEBUG
 # or INFO for everyday use.
 
-# Home Assistant API / OTA / Wi-Fi — uncomment and fill in your secrets to use.
+# Home Assistant API / OTA / Wi-Fi - uncomment and fill in your secrets to use.
 #api:
 #  encryption:
 #    key: !secret api_encryption_key
@@ -35,14 +35,14 @@ external_components:
     components: [nartis_rf_meter]
     refresh: 1s
 
-# CMT2300A RF transceiver wiring (ESP32 GPIOs — adjust to your board).
+# CMT2300A RF transceiver wiring (ESP32 GPIOs - adjust to your board).
 nartis_rf_meter:
   id: nartis
   pin_sdio: GPIO23
   pin_sclk: GPIO18
   pin_csb: GPIO27
   pin_fcsb: GPIO26
-  pin_gpio3: GPIO14               # INT2 — обязательно
+  pin_gpio3: GPIO14               # INT2 - обязательно
   meter_serial: "012345678901"    # 12 цифр с шильдика счётчика
   use_alternative_channels: true  # альтернативная сетка частот (если счётчик не отвечает)
   batch_size: 10                  # читать до 10 атрибутов одним запросом
@@ -193,7 +193,7 @@ text_sensor:
     obis_code: "0.0.96.14.0.255"
     icon: mdi:counter
 
-# Re-pair button — press in Home Assistant to drop the saved session and pair
+# Re-pair button - press in Home Assistant to drop the saved session and pair
 # again (use if communication gets stuck). Waits for the current cycle to finish,
 # so it never breaks an active read.
 button:

@@ -1,5 +1,5 @@
 /*
- * Nartis RF Data Layer — Implementation
+ * Nartis RF Data Layer - Implementation
  *
  * CRC-16/DNP framing (single + dual modes), AES-128-GCM, packet assembly.
  */
@@ -13,7 +13,7 @@
 
 // Crypto: AES-128-GCM is implemented self-contained below (pure-C AES-128 +
 // GHASH/CTR). ESPHome's mbedTLS port compiles out MBEDTLS_GCM_C, and under the
-// esp-idf framework the component link does not even resolve mbedtls_aes_* —
+// esp-idf framework the component link does not even resolve mbedtls_aes_* -
 // so we depend on NO external crypto library. The on-air cipher is AES-128-GCM
 // with AAD = [01 29 L 00], nonce = permuted CIU address + 4-byte counter (BE),
 // 12-byte tag (confirmed by decrypting real frames).
@@ -100,7 +100,7 @@ size_t RfDataLayer::crc_insert(uint8_t *buf, size_t body_size, size_t out_max) {
     return body_size + 2;
   } else {
     if (body_size + 4 > out_max) return 0;
-    // Length byte covers the final frame (buf[0] += 4) — set before CRC1.
+    // Length byte covers the final frame (buf[0] += 4) - set before CRC1.
     buf[RF_TX_LENGTH] = static_cast<uint8_t>((body_size + 4) - 1);
     // Shift bytes [0x7E..body_size-1] right by 2 to make room for CRC1.
     // Use memmove for overlapping region.
@@ -162,7 +162,7 @@ int RfDataLayer::crc_strip(uint8_t *buf, size_t frame_size) {
  *   tag   = 12 bytes
  *
  * The same CIU-address nonce prefix is used in BOTH directions (the meter's
- * responses embed the CIU address in their nested header) — so decrypt uses
+ * responses embed the CIU address in their nested header) - so decrypt uses
  * address_, not meter_address_.
  * ================================================================ */
 
@@ -241,7 +241,7 @@ inline void aes128_ecb(const uint8_t key[16], const uint8_t in[16], uint8_t out[
   memcpy(out, s, 16);
 }
 
-// GHASH multiply: X = X · H in GF(2^128) (NIST SP 800-38D bit convention).
+// GHASH multiply: X = X * H in GF(2^128) (NIST SP 800-38D bit convention).
 void ghash_mul(uint8_t X[16], const uint8_t H[16]) {
   uint8_t Z[16] = {0};
   uint8_t V[16];
@@ -418,8 +418,8 @@ void RfDataLayer::set_aes_key(const uint8_t key[AES_KEY_SIZE]) {
  *   quality = clamp((rssi_dbm + 130) / 2, 1, 62)
  *
  * Verified examples:
- *   -68 dBm → quality 31 → channel 1 gives 0x5F, channel 2 gives 0x9F
- *    -6 dBm → quality 62 (saturated) → channel 1 gives 0x7E
+ *   -68 dBm -> quality 31 -> channel 1 gives 0x5F, channel 2 gives 0x9F
+ *    -6 dBm -> quality 62 (saturated) -> channel 1 gives 0x7E
  * ================================================================ */
 uint8_t RfDataLayer::compose_channel_byte(uint8_t channel_idx, int8_t rssi_dbm) {
   int q = (static_cast<int>(rssi_dbm) + 130) / 2;
@@ -461,7 +461,7 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
     }
     // Counter management:
     //   the counter increments ONLY when the sequence byte changes from the
-    //   previous TX. Same sequence ⇒ reuse the same counter (e.g. beacon
+    //   previous TX. Same sequence => reuse the same counter (e.g. beacon
     //   retransmissions of identical content).
     if (!has_sent_first_tx_ || sequence != last_tx_sequence_) {
       frame_counter_++;
@@ -501,14 +501,14 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
 }
 
 /* ================================================================
- * Frame Parsing (RX, meter→CIU).
+ * Frame Parsing (RX, meter->CIU).
  *
  * Steps:
  *   1. Read length-1 from [0], validate against in_len.
  *   2. CRC strip (in-place on a working copy): single or dual.
  *   3. Validate meter address at [2..9] matches expected.
- *   4. If [11]=[12]=0 → plain branch, return payload at [13..body_end].
- *   5. Else → encrypted branch (rare in observed dataset).
+ *   4. If [11]=[12]=0 -> plain branch, return payload at [13..body_end].
+ *   5. Else -> encrypted branch (rare in observed dataset).
  * ================================================================ */
 
 int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
@@ -547,19 +547,19 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
   if (meter_address_set_) {
     RfAddress src = RfAddress::from_bytes(work + RF_RX_ADDR);
     if (!(src == meter_address_)) {
-      ESP_LOGD(TAG, "RX address mismatch — discarding (got %02X%02X / hash %08X, type %02X)",
+      ESP_LOGD(TAG, "RX address mismatch - discarding (got %02X%02X / hash %08X, type %02X)",
                src.manufacturer_id & 0xFF, (src.manufacturer_id >> 8) & 0xFF,
                static_cast<unsigned>(src.address_id), src.device_type);
       return static_cast<int>(ParseResult::ERR_ADDR);
     }
   }
 
-  // Plain vs encrypted branch — discriminate by frame_type, NOT by bytes
+  // Plain vs encrypted branch - discriminate by frame_type, NOT by bytes
   // [11..12]. The meter uses (work[11]==0 && work[12]==0)
   // as a "plain" indicator, but those bytes are actually the high two bytes
   // of the embedded 4-byte target-CIU hash echo. The meter addresses we
   // observed all have CIU hashes whose top 2 bytes are 0x00, so the meter's
-  // check passes accidentally. Our CIU has hash 00 01 26 5D — byte [12] = 0x01,
+  // check passes accidentally. Our CIU has hash 00 01 26 5D - byte [12] = 0x01,
   // which falsely triggers the encrypted branch.
   //
   // Every RX frame we observed is plain at the transport layer.
@@ -600,17 +600,17 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
                        static_cast<uint32_t>(work[18]);
 
     // Exact length math: enc_data_len + must_be_zero + 0x1F == parse_len
-    // ⇒ enc_data_len + 0 + 0x1F == body_size  (since body_size is post-CRC parse_len).
+    // => enc_data_len + 0 + 0x1F == body_size  (since body_size is post-CRC parse_len).
     if (static_cast<size_t>(enc_data_len) + 0x1F != static_cast<size_t>(body_size)) {
       ESP_LOGW(TAG, "Encrypted RX length math: L+0x1F (%u) != body_size (%d)",
                static_cast<unsigned>(enc_data_len + 0x1F), body_size);
       return static_cast<int>(ParseResult::ERR_LEN_MATH);
     }
 
-    // Replay protection: reject any counter ≤ the highest counter ever accepted.
+    // Replay protection: reject any counter <= the highest counter ever accepted.
     // The meter returns 9 (replay) on this case.
     if (counter <= last_rx_counter_) {
-      ESP_LOGW(TAG, "Encrypted RX replay rejected: counter 0x%08X ≤ last 0x%08X",
+      ESP_LOGW(TAG, "Encrypted RX replay rejected: counter 0x%08X <= last 0x%08X",
                static_cast<unsigned>(counter), static_cast<unsigned>(last_rx_counter_));
       return static_cast<int>(ParseResult::ERR_REPLAY);
     }
@@ -646,7 +646,7 @@ int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
  *
  * Nonce: the meter uses an address derived from the embedded prefix +
  * CIU constants. For now we use the configured CIU address (set_address)
- * as the nonce prefix — works for sessions where the meter responds to
+ * as the nonce prefix - works for sessions where the meter responds to
  * a known CIU.
  * ================================================================ */
 int RfDataLayer::parse_nested_encrypted(const uint8_t *payload, size_t payload_len,
@@ -680,7 +680,7 @@ int RfDataLayer::parse_nested_encrypted(const uint8_t *payload, size_t payload_l
 
   // Replay protection for nested encrypted frames.
   if (counter <= last_nested_rx_counter_) {
-    ESP_LOGW(TAG, "Nested RX replay rejected: counter 0x%08X ≤ last 0x%08X",
+    ESP_LOGW(TAG, "Nested RX replay rejected: counter 0x%08X <= last 0x%08X",
              static_cast<unsigned>(counter), static_cast<unsigned>(last_nested_rx_counter_));
     return static_cast<int>(ParseResult::ERR_REPLAY);
   }
@@ -692,7 +692,7 @@ int RfDataLayer::parse_nested_encrypted(const uint8_t *payload, size_t payload_l
   int dec_len = aes_gcm_decrypt(work, enc_data_len + AES_TAG_SIZE, counter);
   if (dec_len < 0) return static_cast<int>(ParseResult::ERR_MIC);
 
-  // Accept — bump the nested high-water-mark counter.
+  // Accept - bump the nested high-water-mark counter.
   last_nested_rx_counter_ = counter;
 
   memcpy(plain_out, work, dec_len);
@@ -702,7 +702,7 @@ int RfDataLayer::parse_nested_encrypted(const uint8_t *payload, size_t payload_l
 int RfDataLayer::peek_nested_plain(const uint8_t *payload, size_t payload_len,
                                    uint8_t *plain_out, size_t plain_max) const {
   // Mirror parse_nested_encrypted's layout checks but WITHOUT the replay
-  // check or counter bump — purely to show the decrypted DLMS in the log.
+  // check or counter bump - purely to show the decrypted DLMS in the log.
   if (payload_len < 16 + AES_TAG_SIZE) return -1;
   if (payload[8] != 0x01 || payload[9] != AES_GCM_FLAG || payload[11] != 0) return -1;
   const uint8_t enc_data_len = payload[10];

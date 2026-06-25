@@ -1,5 +1,5 @@
 /*
- * Nartis RF Meter — ESPHome Component
+ * Nartis RF Meter - ESPHome Component
  *
  * Top-level orchestrator that ties together:
  *   Layer 1: CMT2300A HAL (SPI, registers, state machine)
@@ -7,8 +7,8 @@
  *   Layer 3: DLMS Client (proprietary read request/response)
  *
  * Implements a non-blocking state machine in loop() that performs:
- *   RSSI scan → Channel select → Beacon → GET (×N) + ACK → Publish
- * No separate AARQ/AARE — the meter uses a proprietary per-request format.
+ *   RSSI scan -> Channel select -> Beacon -> GET (xN) + ACK -> Publish
+ * No separate AARQ/AARE - the meter uses a proprietary per-request format.
  */
 
 #pragma once
@@ -34,16 +34,16 @@ namespace esphome::nartis_rf_meter {
 /// session without re-running the handshake. Plain-old-data, byte-packed so
 /// the layout is stable across builds (bump kNvsStateVersion if it changes).
 struct NvsPairingState {
-  uint32_t version;                 // kNvsStateVersion; mismatch ⇒ ignore blob
+  uint32_t version;                 // kNvsStateVersion; mismatch => ignore blob
   uint8_t  aes_key[AES_KEY_SIZE];   // meter-assigned data key (ASCII(SN)[12] + suffix[4])
   uint8_t  meter_addr[8];           // learned meter RF address (RX filter)
-  uint8_t  ciu_addr[8];             // our own RF address at pair time; mismatch ⇒ identity changed, re-pair
+  uint8_t  ciu_addr[8];             // our own RF address at pair time; mismatch => identity changed, re-pair
   uint32_t frame_counter;           // last TX GCM counter used (rf_)
   uint32_t last_rx_counter;         // RX replay counter
   uint32_t last_nested_rx_counter;  // nested-RX replay counter
   uint8_t  data_seq;                // mode-1/2 TX sequence
   uint8_t  beacon_seq;              // mode-3/6 TX sequence
-  uint8_t  paired;                  // 1 ⇒ a valid session was saved
+  uint8_t  paired;                  // 1 => a valid session was saved
   uint8_t  _pad;                    // keep the struct an even size
 } __attribute__((packed));
 
@@ -76,7 +76,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void set_meter_serial(const std::string &s);
   void set_ciu_serial(const std::string &s) { ciu_serial_ = s; }
   /// Set the full 8-byte CIU RF address as 16 hex chars (e.g. "CD2C0000026B5025").
-  /// Overrides serial/MAC derivation — use to impersonate a paired CIU exactly.
+  /// Overrides serial/MAC derivation - use to impersonate a paired CIU exactly.
   void set_ciu_address(const std::string &hex) { ciu_address_ = hex; }
 
   /// Pin the active-mode physical channel (0..3), bypassing the RSSI auto-scan.
@@ -108,7 +108,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void set_rx_timeout_ms(uint32_t ms) { rx_timeout_ms_ = ms; }
 
   /// Short RX wait for the steady-state GET reply states, applied only until the
-  /// first byte arrives — a request dropped in the meter's post-TX deaf window
+  /// first byte arrives - a request dropped in the meter's post-TX deaf window
   /// re-sends after this instead of stalling the full rx_timeout. Default 900.
   void set_rx_reply_timeout_ms(uint32_t ms) { rx_reply_timeout_ms_ = ms; }
 
@@ -119,7 +119,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
 
   /// Request a fresh pairing handshake from outside (e.g. a Home Assistant
   /// button). Safe at any time: the in-flight cycle is allowed to finish, then
-  /// the saved session is dropped and re-pairing starts on the next idle loop —
+  /// the saved session is dropped and re-pairing starts on the next idle loop -
   /// it never interrupts active communication.
   void request_repair();
 
@@ -131,7 +131,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     RSSI_SCAN,
     CHANNEL_SELECT,
     // First-time pairing handshake (only when not yet paired this boot)
-    //   probe (plain, meter serial) → 0x06 → ACK (enc) → 0x53 → mode-6 (plain) → keepalive
+    //   probe (plain, meter serial) -> 0x06 -> ACK (enc) -> 0x53 -> mode-6 (plain) -> keepalive
     PAIR_PROBE_TX,
     PAIR_PROBE_WAIT_TX_DONE,
     PAIR_PROBE_WAIT_RESPONSE,
@@ -141,11 +141,11 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     PAIR_MODE6_TX,
     PAIR_MODE6_WAIT_TX_DONE,
     PAIR_WAIT_READY,              // expect RX 0x5B/0x40 = meter ready
-    // Wake beacon — opens the session before reading.
+    // Wake beacon - opens the session before reading.
     WAKE_BEACON_TX,
     WAKE_BEACON_WAIT_TX_DONE,
     WAKE_WAIT_ACK,                // expect RX 0x40 short ack
-    // Data-read cycle: REQUEST → POLL → CLOSE, each TX / WAIT_TX_DONE / WAIT_<reply>.
+    // Data-read cycle: REQUEST -> POLL -> CLOSE, each TX / WAIT_TX_DONE / WAIT_<reply>.
     READ_REQUEST_TX,              // TX 0x44 encrypted get-request (IEC+DLMS payload)
     READ_REQUEST_WAIT_TX_DONE,
     READ_WAIT_REQUEST_ACK,        // expect RX 0x5B = "got request, preparing data" (may jump to 0x43)
@@ -154,7 +154,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
     READ_WAIT_DATA,               // expect RX 0x43 with the actual data response
     READ_CLOSE_BEACON_TX,         // TX 0x08 beacon to acknowledge/close
     READ_CLOSE_BEACON_WAIT_TX_DONE,
-    READ_WAIT_CLOSE_ACK,          // expect RX 0x40 short ack — cycle complete
+    READ_WAIT_CLOSE_ACK,          // expect RX 0x40 short ack - cycle complete
     // Publish results
     PUBLISH,
     // Error recovery
@@ -176,7 +176,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   bool try_rearm_rx_(const char *ctx, uint8_t got_type, int parse_result);
 
   /// Kick off one pairing/read cycle. Called from update() whenever IDLE.
-  /// Always starts at RSSI scan → channel select; the pair-vs-read branch then
+  /// Always starts at RSSI scan -> channel select; the pair-vs-read branch then
   /// happens in handle_channel_select_() based on paired_.
   void start_cycle_();
   /// Soft-recover from a failed cycle: stop RX, sleep the radio, reset DLMS,
@@ -211,8 +211,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
    * onto whichever channel first yields a reply, for the rest of the session.
    *
    * Active whenever no channel is pinned (fix_channel < 0), independent of
-   * which channel table is in use. Hops move RX only — TX stays on Ch0/433.82,
-   * the meter's wake frequency — so it's safe for both the default presets
+   * which channel table is in use. Hops move RX only - TX stays on Ch0/433.82,
+   * the meter's wake frequency - so it's safe for both the default presets
    * and the custom presets.
    */
   bool channel_hopping_enabled_() const { return fix_channel_ < 0; }
@@ -243,7 +243,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
 
   bool transmit_frame_(RfFrameType type, const uint8_t *payload, size_t len);
 
-  // Chunked RX — for packets > 64 bytes
+  // Chunked RX - for packets > 64 bytes
   enum class RxStatus : uint8_t {
     IN_PROGRESS,
     COMPLETE,
@@ -285,7 +285,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   RfAddress address_{};
   uint8_t aes_key_[AES_KEY_SIZE]{};
 
-  /* Hardcoded protocol constants — same for all Nartis devices */
+  /* Hardcoded protocol constants - same for all Nartis devices */
   static constexpr const char *PASSWORD_ = "123456";  // local pairing PIN, not sent over RF
   static constexpr uint16_t CLIENT_ADDRESS_ = 16;
   static constexpr uint16_t SERVER_ADDRESS_ = 1;
@@ -295,27 +295,27 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // get-request in ~190 ms; a long wait only burns time when our request lands
   // in the meter's post-TX deaf window (it ignores frames that arrive too soon
   // after it just transmitted). So in the GET reply states we time out fast and
-  // re-send, re-probing until the meter reopens its receiver — instead of
+  // re-send, re-probing until the meter reopens its receiver - instead of
   // sitting through one 3 s stall. The short timeout applies only until the
   // first byte arrives; once a reply starts, RX_TIMEOUT_MS_ governs completion
   // so a large frame is never aborted mid-flight. (Pairing keeps the long
-  // timeout + PAIR_RETRY_DELAY_MS_ pacing — it's one-time and works.)
+  // timeout + PAIR_RETRY_DELAY_MS_ pacing - it's one-time and works.)
   static constexpr uint32_t RX_REPLY_TIMEOUT_MS_DEFAULT_ = 900;
-  // ~900 ms RX + ~250 ms TX ≈ 1.15 s per probe; 6 spans a ~7 s deaf window.
+  // ~900 ms RX + ~250 ms TX ~ 1.15 s per probe; 6 spans a ~7 s deaf window.
   static constexpr uint8_t GET_REPLY_MAX_RETRIES_ = 6;
-  // Pairing-step pacing — matches the real CIU's observed timings:
-  //   * Retry after no response (probe→probe = 5755 ms, ACK→ACK = 5104 ms):
+  // Pairing-step pacing - matches the real CIU's observed timings:
+  //   * Retry after no response (probe->probe = 5755 ms, ACK->ACK = 5104 ms):
   //     combine TX (~200 ms) + RX_TIMEOUT_MS_ (3000 ms) + gate = ~5500 ms total.
-  //   * First TX after RX 0x06: real CIU fires at +637 ms — fast.
+  //   * First TX after RX 0x06: real CIU fires at +637 ms - fast.
   //   * First TX after RX 0x53 (mode-6 confirm): real CIU waits 5629 ms.
   //     Meter is doing key-install internally; faster than this gets dropped.
-  static constexpr uint32_t PAIR_RETRY_DELAY_MS_         = 2300;  // gate during retry-after-timeout → ~5.5 s total
+  static constexpr uint32_t PAIR_RETRY_DELAY_MS_         = 2300;  // gate during retry-after-timeout -> ~5.5 s total
   static constexpr uint32_t PAIR_POST_PROBE_DELAY_MS_    = 500;   // small settle after RX 0x06, before ACK TX
   static constexpr uint32_t PAIR_POST_SESSION_DELAY_MS_  = 5500;  // long gate after RX 0x53, before mode-6 TX
-  // GET-cycle pacing — measured from a real-CIU normal session:
+  // GET-cycle pacing - measured from a real-CIU normal session:
   //
-  //   RX 0x5B keepalive  →  TX data-request BEACON   ≈ 4800 ms
-  //   RX 0x43 response   →  TX closing BEACON        ≈ 4200 ms
+  //   RX 0x5B keepalive  ->  TX data-request BEACON   ~ 4800 ms
+  //   RX 0x43 response   ->  TX closing BEACON        ~ 4200 ms
   //
   // The 4-5 second window after RX 0x5B is the meter querying its OBIS
   // registers internally. Sending the BEACON earlier than that makes the
@@ -324,11 +324,11 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   static constexpr uint32_t READ_POLL_BEACON_DELAY_MS_     = 5000;
   static constexpr uint32_t READ_CLOSE_BEACON_DELAY_MS_     = 4500;
 
-  // FAST PRIMING (experiment). The priming read is a throwaway engagement GET —
+  // FAST PRIMING (experiment). The priming read is a throwaway engagement GET -
   // its 0x43 data is discarded, so it does NOT need the ~5 s pacing that exists
   // to let the meter prepare *real* data. We only need enough req-beacon polls
   // to engage the meter so the first real batch is answered directly. Using a
-  // short delay + few retries cuts priming from ~15 s (3×5 s) to a few seconds.
+  // short delay + few retries cuts priming from ~15 s (3x5 s) to a few seconds.
   // These apply ONLY while !session_primed_; real batches keep the full pacing.
   // Tune up if the first real batch starts coming back sacrificial (0x40 no-data).
   static constexpr uint32_t PRIMING_POLL_BEACON_DELAY_MS_ = 1000;
@@ -343,14 +343,14 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   uint8_t user_batch_size_{USER_BATCH_SIZE_DEFAULT_};
   uint32_t rx_timeout_ms_{RX_TIMEOUT_MS_DEFAULT_};
   uint32_t rx_reply_timeout_ms_{RX_REPLY_TIMEOUT_MS_DEFAULT_};
-  bool skip_fin_beacons_{false};   // YAML skip_fin_beacons — no closing beacon between batches
+  bool skip_fin_beacons_{false};   // YAML skip_fin_beacons - no closing beacon between batches
   uint8_t current_sensor_idx_{0};
   // The protocol maintains TWO independent TX sequence counters:
   //
-  //   data_seq_   — used by mode-1 (DATA/probe, 0x46) and mode-2 (ACK, 0x44).
-  //                 The real CIU starts at 2 → 02, 03, 04, 05 ...
+  //   data_seq_   - used by mode-1 (DATA/probe, 0x46) and mode-2 (ACK, 0x44).
+  //                 The real CIU starts at 2 -> 02, 03, 04, 05 ...
   //
-  //   beacon_seq_ — used by mode-3 (BEACON, 0x08) and mode-6 (PLAIN_DATA, 0x00).
+  //   beacon_seq_ - used by mode-3 (BEACON, 0x08) and mode-6 (PLAIN_DATA, 0x00).
   //                 The real CIU sends mode-6 with seq=01. Independent from
   //                 data_seq_. Starts at 1.
   //
@@ -378,7 +378,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   bool repair_requested_{false};
 
   esphome::ESPPreferenceObject pref_;
-  // Bump when NvsPairingState layout/semantics change — a mismatch makes
+  // Bump when NvsPairingState layout/semantics change - a mismatch makes
   // load_pairing_state_() ignore the stored blob and re-pair.
   static constexpr uint32_t NVS_STATE_VERSION_ = 2;
   // On restore, advance the TX frame counter past any values that may have been
@@ -431,12 +431,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // (FIFO_TH_VALUE - 1) = 14 trailing bytes take ~47 ms to arrive. Must wait
   // long enough that all of them are in the FIFO before we read by length.
   // Observed in practice: the on-air CRC `44 A8` read back as `00 00` with the
-  // old 30 ms wait — i.e. we read the FIFO before the last 2 bytes had arrived.
+  // old 30 ms wait - i.e. we read the FIFO before the last 2 bytes had arrived.
   // 70 ms covers the 14-byte worst case with margin.
   static constexpr uint32_t RX_TAIL_WAIT_MS_ = 70;
   // Drain-stall recovery: once the packet is fully received the chip stops
   // asserting RX_FIFO_TH even with a full chunk (>= FIFO_TH_VALUE) still unread
-  // in the FIFO — the chunk-drain then halts at a multiple of FIFO_TH_VALUE
+  // in the FIFO - the chunk-drain then halts at a multiple of FIFO_TH_VALUE
   // (observed 45/66, 75/93). If the drain has found nothing for this long while
   // bytes are still owed, reception is over and the remainder is sitting in the
   // 64 B FIFO; read it directly by length. Must exceed the in-flight inter-chunk

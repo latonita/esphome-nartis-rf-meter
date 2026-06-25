@@ -1,5 +1,5 @@
 /*
- * CMT2300A Hardware Abstraction Layer — Implementation
+ * CMT2300A Hardware Abstraction Layer - Implementation
  *
  * Bit-bang 3-wire SPI driver for CMT2300A sub-GHz transceiver.
  * Handles register/FIFO access and chip state machine transitions.
@@ -191,7 +191,7 @@ bool Cmt2300aHal::init() {
   }
 
   if (!is_chip_connected()) {
-    ESP_LOGE(TAG, "CMT2300A not detected — check wiring");
+    ESP_LOGE(TAG, "CMT2300A not detected - check wiring");
     return false;
   }
 
@@ -249,12 +249,12 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // The SYS2 patch alone moves TX from the freq bank's "RX-half" (434.10 MHz @
   // Ch0 = wrong) to the "TX-half" (433.82 MHz @ Ch0 = correct).
 
-  // SYS2 (0x0D): clear top 3 bits — PLL/XO trim cluster. This is what flips
+  // SYS2 (0x0D): clear top 3 bits - PLL/XO trim cluster. This is what flips
   // the chip onto the TX-half of the freq bank (regs 0x1C..0x1F).
   update_reg(REG_SYS2, 0xE0, 0x00);
 
   // Sync word patch ("normal" mode = 0x72 F6 55 55). RFPDK default was
-  // F6 55 55 55 — the meter's correlator won't lock on the wrong byte. The
+  // F6 55 55 55 - the meter's correlator won't lock on the wrong byte. The
   // stock CIU selects this variant via a persistent EEPROM byte.
   write_reg(REG_PKT10, 0x72);
   write_reg(REG_PKT11, 0xF6);
@@ -269,15 +269,15 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // ---- FIFO + interrupt setup ----
 
   // FIFO merge: combine TX+RX FIFO into 64-byte single buffer
-  // REG_SYS11 (0x16): (reg & 0xE0) | 0x12  — merge configuration
+  // REG_SYS11 (0x16): (reg & 0xE0) | 0x12  - merge configuration
   update_reg(REG_SYS11, static_cast<uint8_t>(~MASK_FIFO_MERGE_CFG), FIFO_MERGE_VALUE);
   // REG_FIFO_CTL (0x69): set FIFO_MERGE_EN (FIFO_CTL |= 0x02)
   update_reg(REG_FIFO_CTL, MASK_FIFO_MERGE_EN, MASK_FIFO_MERGE_EN);
 
-  // FIFO threshold — 0x0F (15 bytes), not 0x0C.
+  // FIFO threshold - 0x0F (15 bytes), not 0x0C.
   update_reg(REG_PKT29, MASK_FIFO_TH, FIFO_TH_VALUE);
 
-  // Route the GPIO3 pad to INT2 — this is the only interrupt pad we wire to the
+  // Route the GPIO3 pad to INT2 - this is the only interrupt pad we wire to the
   // ESP32. INT2 carries the live FIFO-threshold signal we poll (TX_FIFO_TH during
   // TX, RX_FIFO_TH during RX); GPIO3 = INT2 (0x20). GPIO1/GPIO2 are left at their
   // POR defaults (unconnected on our board).
@@ -288,7 +288,7 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // bit makes the line active-LOW (idle-high), which falsely reads as "packet
   // done" every poll. So clear it (= 0).
   // The live signal (TX_FIFO_TH during TX, RX_FIFO_TH during RX) lands on
-  // INT2 → the GPIO3 pad we poll. Default to RX_FIFO_TH (INT2=0x0C).
+  // INT2 -> the GPIO3 pad we poll. Default to RX_FIFO_TH (INT2=0x0C).
   update_reg(REG_INT2_CTL, MASK_INT2_SEL, INT_SEL_RX_FIFO_TH);
   update_reg(REG_INT2_CTL, MASK_INT_POLAR, 0x00);
 
@@ -327,7 +327,7 @@ bool Cmt2300aHal::go_sleep() {
 }
 
 bool Cmt2300aHal::go_rx() {
-  // Must go STBY → RFS → RX
+  // Must go STBY -> RFS -> RX
   if (get_state() != STA_STBY) {
     if (!go_standby()) return false;
   }
@@ -351,7 +351,7 @@ bool Cmt2300aHal::go_rx() {
 }
 
 bool Cmt2300aHal::go_tx() {
-  // Must go STBY → TFS → TX
+  // Must go STBY -> TFS -> TX
   if (get_state() != STA_STBY) {
     if (!go_standby()) return false;
   }
@@ -403,11 +403,11 @@ void Cmt2300aHal::set_rx_channel(uint8_t ch) {
 
   // The frequency bank is 8 bytes: [0..3] = RX-half, [4..7] = TX-half. Write
   // only the 4 RX bytes (regs 0x18..0x1B) so the TX frequency (set earlier to
-  // Ch0/433.82) is preserved — RX hops, TX stays on the meter's wake frequency.
+  // Ch0/433.82) is preserved - RX hops, TX stays on the meter's wake frequency.
   const uint8_t (*channels)[8] = use_custom_channels_ ? NARTIS_CUSTOM_CHANNELS : NARTIS_FREQ_CHANNELS;
   write_bank(FREQUENCY_BANK_ADDR, channels[ch], 4);
 
-  ESP_LOGD(TAG, "Set RX channel %d (%s preset, RX-only — TX unchanged)",
+  ESP_LOGD(TAG, "Set RX channel %d (%s preset, RX-only - TX unchanged)",
            ch, use_custom_channels_ ? "custom" : "default");
 }
 
@@ -425,7 +425,7 @@ void Cmt2300aHal::clear_rx_fifo() {
 
 void Cmt2300aHal::reset_rx_fifo_full() {
   // Full reset of the merged FIFO for RX: restore read/write pointers AND
-  // clear both halves. Required after a TX→RX direction switch so the RX
+  // clear both halves. Required after a TX->RX direction switch so the RX
   // side doesn't start against the bytes left over from the last TX.
   write_reg(REG_FIFO_CLR, FIFO_RESTORE | FIFO_CLR_RX | FIFO_CLR_TX);
 }
@@ -457,13 +457,13 @@ void Cmt2300aHal::set_tx_payload_length(uint16_t len) {
 void Cmt2300aHal::set_rx_payload_length() {
   // 511 = the large bank default ceiling. Variable-length-in-front frames are
   // bounded by this; our frames are <= ~93 B, so it never caps a real frame.
-  // (Same register layout as the TX setter — single source of truth.)
+  // (Same register layout as the TX setter - single source of truth.)
   set_tx_payload_length(511);
 }
 
 uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
   // Picks the quietest channel.
-  // Per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,
+  // Per channel: enable RSSI mode -> GO_RX -> 2 ms settle -> 1 initial sample,
   //              6 more samples with 2 ms between each, track running max & min,
   //              score = (sum_of_6 - max - min) / 4.
   // Channel selection (preserves the ch0-never-picked quirk):
@@ -509,7 +509,7 @@ uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
     ESP_LOGD(TAG, "scan_channels: ch%u score=%d dBm (min=%d max=%d)",
              ch, score, min_seen, max_seen);
 
-    // Comparison logic — preserve the ch0-unreachable quirk.
+    // Comparison logic - preserve the ch0-unreachable quirk.
     if (ch == 1) {
       best_ch = 1;
       best_score = score;
@@ -542,7 +542,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   // Switch the merged FIFO fully to TX-WRITE mode and reset its pointers. This
   // MUST recover from a preceding RX session (which left it in SPI-read /
   // RX-direction mode); otherwise the FIFO write below lands nowhere and the
-  // chip stalls waiting for TX data → TX_DONE never fires.
+  // chip stalls waiting for TX data -> TX_DONE never fires.
   //   FIFO_MERGE_EN on, FIFO_RX_TX_SEL=1 (TX), SPI_FIFO_RD_WR_SEL=1 (SPI writes)
   update_reg(REG_FIFO_CTL, MASK_FIFO_MERGE_EN | MASK_FIFO_RX_TX_SEL | MASK_SPI_FIFO_RD_WR_SEL,
              MASK_FIFO_MERGE_EN | MASK_FIFO_RX_TX_SEL | MASK_SPI_FIFO_RD_WR_SEL);
@@ -555,7 +555,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   spi_write_fifo(data, initial);
   size_t written = initial;
 
-  // Enter TX mode: STBY → TFS → TX
+  // Enter TX mode: STBY -> TFS -> TX
   spi_write_reg(REG_MODE_CTL, GO_TFS);
   if (!wait_for_state(STA_TFS)) {
     ESP_LOGE(TAG, "Chunked TX: failed to enter TFS");
@@ -567,19 +567,19 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   }
 
   // Poll: refill FIFO as it drains, wait for TX_DONE.
-  // 600 ms covers the largest frame (~290 B ≈ 480 ms airtime at 4800 bps). // this shall be 2400!
+  // 600 ms covers the largest frame (~290 B ~ 480 ms airtime at 4800 bps). // this shall be 2400!
   static constexpr uint32_t TX_TIMEOUT_MS = 600;
   uint32_t start = esphome::millis();
 
   uint16_t refills = 0;  // diagnostic: how many TX_FIFO_TH refills we serviced
   while (esphome::millis() - start < TX_TIMEOUT_MS) {
-    // Check TX_DONE first — leave flag set for caller's is_tx_done() check
+    // Check TX_DONE first - leave flag set for caller's is_tx_done() check
     uint8_t int_clr1 = spi_read_reg(REG_INT_CLR1);
     if (int_clr1 & CLR1_TX_DONE_FLG) {
       ESP_LOGVV(TAG, "Chunked TX complete: %d/%d bytes written, %u refill(s)",
                (int) written, (int) len, refills);
       if (written < len) {
-        ESP_LOGW(TAG, "Chunked TX: TX_DONE but only %d/%d bytes written — frame truncated on air!",
+        ESP_LOGW(TAG, "Chunked TX: TX_DONE but only %d/%d bytes written - frame truncated on air!",
                  (int) written, (int) len);
       }
       return true;
@@ -591,7 +591,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
     // Refill on this flag CLEAR.
     //
     // BUG FIX: we previously polled GPIO3 (active-high TX_FIFO_TH) and refilled
-    // while it was HIGH — i.e. while the FIFO was still FULL — which overflowed
+    // while it was HIGH - i.e. while the FIFO was still FULL - which overflowed
     // the FIFO and dropped the frame tail. That silently corrupted every frame
     // > 64 B (the ones needing a refill) while <= 64 B frames worked. Read the
     // flag straight from REG_FIFO_FLAG over SPI so we don't depend on INT polarity.
@@ -603,7 +603,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
       refills++;
     }
 
-    // Feed the watchdog — this loop can block for many ms and ESP8266's soft
+    // Feed the watchdog - this loop can block for many ms and ESP8266's soft
     // WDT resets if we spin without yielding.
     esphome::yield();
     esphome::delayMicroseconds(50);
@@ -662,14 +662,14 @@ bool Cmt2300aHal::read_gpio3() {
 }
 
 bool Cmt2300aHal::test_gpio3_wiring() {
-  // INT2 = RX_ACTIVE → pin is high only while the chip sits in RX state.
+  // INT2 = RX_ACTIVE -> pin is high only while the chip sits in RX state.
   set_int_source(INT_SEL_RX_ACTIVE);
 
   go_standby();
   esphome::delayMicroseconds(300);
   bool in_stby = pin_read(gpio3_);
 
-  // Enter RX (STBY → RFS → RX) and sample the pin.
+  // Enter RX (STBY -> RFS -> RX) and sample the pin.
   spi_write_reg(REG_MODE_CTL, GO_RFS);
   wait_for_state(STA_RFS);
   spi_write_reg(REG_MODE_CTL, GO_RX);
@@ -683,17 +683,17 @@ bool Cmt2300aHal::test_gpio3_wiring() {
 
   bool ok = (!in_stby && in_rx);
   if (ok) {
-    ESP_LOGI(TAG, "GPIO3 wiring OK: pin LOW in STBY, HIGH in RX (INT2→pin_gpio3 good)");
+    ESP_LOGI(TAG, "GPIO3 wiring OK: pin LOW in STBY, HIGH in RX (INT2->pin_gpio3 good)");
   } else {
     ESP_LOGE(TAG, "GPIO3 wiring FAIL: STBY=%d RX=%d (expected 0 then 1). "
-                  "Check the chip's GPIO3 pad is wired to pin_gpio3 — RX cannot work otherwise.",
+                  "Check the chip's GPIO3 pad is wired to pin_gpio3 - RX cannot work otherwise.",
              in_stby, in_rx);
   }
   return ok;
 }
 
 void Cmt2300aHal::set_int_source(uint8_t source) {
-  // INT2 surfaces on the GPIO3 pad — the line we poll (TX_FIFO_TH during TX,
+  // INT2 surfaces on the GPIO3 pad - the line we poll (TX_FIFO_TH during TX,
   // RX_FIFO_TH during RX). Preserves the polarity bit.
   update_reg(REG_INT2_CTL, MASK_INT2_SEL, source & MASK_INT2_SEL);
 }
@@ -712,7 +712,7 @@ size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
   // RX_FIFO_TH-driven chunk drain. INT2 (=RX_FIFO_TH) surfaces on the GPIO3 pin
   // and is HIGH while >= FIFO_TH_VALUE bytes sit in the RX FIFO. We poll that pin
   // (the stock CIU reads the chip's INT output pin via MCU GPIO too; the SPI
-  // status regs 0x6D/0x6E read 0xFF here — Control2 bank — so they're unusable).
+  // status regs 0x6D/0x6E read 0xFF here - Control2 bank - so they're unusable).
   // Drain full threshold chunks while the line is asserted.
   //
   // The trailing < FIFO_TH_VALUE bytes of a frame never raise RX_FIFO_TH; the

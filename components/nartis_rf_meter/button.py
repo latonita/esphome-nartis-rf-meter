@@ -1,4 +1,4 @@
-"""Nartis RF Meter — Button platform (manual re-pair trigger)."""
+"""Nartis RF Meter - Button platform (manual re-pair trigger)."""
 
 import esphome.codegen as cg
 import esphome.config_validation as cv

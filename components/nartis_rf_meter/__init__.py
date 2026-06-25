@@ -1,4 +1,4 @@
-"""Nartis RF Meter — ESPHome external component for Nartis meters via CMT2300A RF433."""
+"""Nartis RF Meter - ESPHome external component for Nartis meters via CMT2300A RF433."""
 
 from esphome import pins
 import esphome.codegen as cg
@@ -71,14 +71,14 @@ CONFIG_SCHEMA = cv.Schema(
             # RX presets are 97..278 kHz off where this meter actually replies and
             # miss it; these centres + 100 kHz BW + AFC capture it. Default: off.
             cv.Optional(CONF_USE_ALTERNATIVE_CHANNELS, default=False): cv.boolean,
-            # CIU serial — for replacing an existing CIU unit;
+            # CIU serial - for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
             # Full CIU RF address override (16 hex chars). Use to impersonate the
-            # exact CIU a meter is already paired with — meters typically only
+            # exact CIU a meter is already paired with - meters typically only
             # answer their paired CIU's address. Overrides ciu_serial/MAC.
             cv.Optional(CONF_CIU_ADDRESS): validate_ciu_address,
-            # --- Tuning (optional; sensible defaults — leave unset for normal use) ---
+            # --- Tuning (optional; sensible defaults - leave unset for normal use) ---
             # How many user-defined OBIS attributes to read per get-request-with-list.
             # Larger = fewer poll cycles but bigger 0x43 replies (DLMS caps at 10/list).
             cv.Optional(CONF_BATCH_SIZE, default=5): cv.int_range(min=1, max=10),

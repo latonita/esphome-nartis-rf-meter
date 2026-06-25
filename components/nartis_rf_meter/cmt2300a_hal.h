@@ -5,24 +5,24 @@
  * Zero knowledge of packets, protocols, or framing.
  *
  * Pin interface:
- *   SDIO  — bidirectional data (shared MOSI/MISO)
- *   SCLK  — serial clock
- *   CSB   — chip select for register access (active low)
- *   FCSB  — chip select for FIFO access (active low)
- *   GPIO3 — chip interrupt output, routed to INT2. Carries the FIFO-threshold
+ *   SDIO  - bidirectional data (shared MOSI/MISO)
+ *   SCLK  - serial clock
+ *   CSB   - chip select for register access (active low)
+ *   FCSB  - chip select for FIFO access (active low)
+ *   GPIO3 - chip interrupt output, routed to INT2. Carries the FIFO-threshold
  *           level we poll (RX_FIFO_TH in RX, TX_FIFO_TH in TX). On this chip
  *           GPIO3 can only output INT2 (not INT1), which is why INT2 is used.
  *
  * FIFO reception (polling, no ISR):
  *   The component's main loop calls poll_rx_drain() each iteration. It polls
- *   the GPIO3/INT2 line — HIGH while >= FIFO_TH_VALUE unread bytes sit in the
- *   RX FIFO (RX_FIFO_TH, an auto-clearing level per the datasheet) — and burst-
+ *   the GPIO3/INT2 line - HIGH while >= FIFO_TH_VALUE unread bytes sit in the
+ *   RX FIFO (RX_FIFO_TH, an auto-clearing level per the datasheet) - and burst-
  *   reads a full FIFO_TH_VALUE chunk via SPI each time the line is asserted.
  *   The trailing < FIFO_TH_VALUE bytes never raise RX_FIFO_TH, so the caller
  *   reads that tail by frame length once it has arrived.
  *
  *   We poll the physical pin rather than the SPI FIFO-flag register (0x6E):
- *   that register reads 0xFF here (Control2 bank), so it is unusable — matching
+ *   that register reads 0xFF here (Control2 bank), so it is unusable - matching
  *   the stock CIU, which also reads the chip's INT pin via MCU GPIO.
  */
 
@@ -59,10 +59,10 @@ class Cmt2300aHal {
   /// Transition to Sleep mode.
   bool go_sleep();
 
-  /// Transition to RX mode (via RFS → RX).
+  /// Transition to RX mode (via RFS -> RX).
   bool go_rx();
 
-  /// Transition to TX mode (via TFS → TX).
+  /// Transition to TX mode (via TFS -> TX).
   bool go_tx();
 
   /// Read current chip state from MODE_STA register.
@@ -90,7 +90,7 @@ class Cmt2300aHal {
   void clear_rx_fifo();
 
   /// Full merged-FIFO reset for RX: FIFO_RESTORE + clear RX/TX. Use after a
-  /// TX→RX direction switch so RX doesn't see leftover TX bytes.
+  /// TX->RX direction switch so RX doesn't see leftover TX bytes.
   void reset_rx_fifo_full();
 
   /// Write data to TX FIFO. Returns number of bytes written (limited by FIFO size).
@@ -142,12 +142,12 @@ class Cmt2300aHal {
 
   /// Scan all NUM_CHANNELS channels, return the channel index with the lowest
   /// trimmed-mean RSSI. Picks the quietest channel:
-  ///   per channel: enable RSSI mode → GO_RX → 2 ms settle → 1 initial sample,
+  ///   per channel: enable RSSI mode -> GO_RX -> 2 ms settle -> 1 initial sample,
   ///                then 6 more samples with 2 ms between each,
   ///                score = (sum_of_6 - max - min) / 4  (trimmed mean of middle 4).
   /// Note: channel 0 is never selected (off-by-one quirk: ch0's score is computed
   /// but never compared). This impl preserves that behavior so the meter's expectations
-  /// match — channels 1, 2, 3 are eligible; the device returns 1 if none is better.
+  /// match - channels 1, 2, 3 are eligible; the device returns 1 if none is better.
   /// If out_score is non-null, must point to at least NUM_CHANNELS int8_t and is
   /// filled with each channel's trimmed-mean dBm score.
   /// Leaves chip in STBY with FIFO merge restored, parked on the chosen channel.

@@ -1,5 +1,5 @@
 /*
- * Nartis RF Meter — Shared Types and Constants
+ * Nartis RF Meter - Shared Types and Constants
  *
  * Defines the on-wire frame layout, including dual-CRC handling for
  * frames > 128 bytes.
@@ -43,7 +43,7 @@ static constexpr uint16_t CRC16_INIT = 0x0000;
 static constexpr uint16_t CRC16_XOROUT = 0xFFFF;
 
 /* ================================================================
- * RF Address — 8-byte session identifier
+ * RF Address - 8-byte session identifier
  *
  * Per-device, derived from serial:
  *   [0..1] manufacturer_id_prefix  = 0x2CCD constant (bytes CD 2C on wire)
@@ -97,14 +97,14 @@ struct RfAddress {
   ///
   /// Algorithm:
   ///   1. Take last 7 chars of serial
-  ///   2. strtoul(str, 10) — stops at first non-digit (e.g. "02RV634" → 2)
+  ///   2. strtoul(str, 10) - stops at first non-digit (e.g. "02RV634" -> 2)
   ///   3. config[3..5] = 3 bytes big-endian of result
   ///   4. config[6] = seed % 255
   ///   5. Fixed manufacturer_id=0x2CCD, version=0x50, device_type=0x25
   ///
   /// Verified examples:
-  ///   "MPCUA00294W6" + seed 230 → CD 2C 00 01 26 E6 50 25
-  ///   "MPCUA002RV634" + seed 107 → CD 2C 00 00 02 6B 50 25
+  ///   "MPCUA00294W6" + seed 230 -> CD 2C 00 01 26 E6 50 25
+  ///   "MPCUA002RV634" + seed 107 -> CD 2C 00 00 02 6B 50 25
   static RfAddress derive(const char *ciu_serial, uint32_t seed) {
     RfAddress addr;
     addr.device_type = RF_DEVICE_TYPE_CIU;
@@ -132,34 +132,34 @@ struct RfAddress {
 };
 
 /* ================================================================
- * RF Frame Types — outgoing (CIU→meter) header byte [1]
+ * RF Frame Types - outgoing (CIU->meter) header byte [1]
  *
  * In the captured traffic only 0x44 and 0x08 were observed.
  * ================================================================ */
 enum class RfFrameType : uint8_t {
-  BEACON = 0x08,       // Mode 3: wake/beacon (short encrypted frame) — M-Bus RSP_UD
+  BEACON = 0x08,       // Mode 3: wake/beacon (short encrypted frame) - M-Bus RSP_UD
   DATA = 0x46,         // Mode 1: data frame
   ACK = 0x44,          // Mode 2: ACK / response (large encrypted frame)
   PLAIN_DATA = 0x00,   // Mode 6: special-channel config (no RF AES-GCM)
 };
 
 /* ================================================================
- * RX Frame Types — incoming (meter→CIU) header byte [1].
+ * RX Frame Types - incoming (meter->CIU) header byte [1].
  * Compared as the raw byte (the router decides even on CRC-fail).
  *
  * These byte values are the M-Bus (EN 13757-2) data-link Control field (C-field)
- * function codes — but with roles repurposed for Nartis's RF beacon scheme (here
+ * function codes - but with roles repurposed for Nartis's RF beacon scheme (here
  * the meter acts as the M-Bus "master"), so the names below describe the observed
  * behavior, not the standard M-Bus semantics.
  * ================================================================ */
 static constexpr uint8_t RX_TYPE_PRESENCE_ACK  = 0x06;  // answer to the pairing probe (Nartis-specific, not M-Bus)
-static constexpr uint8_t RX_TYPE_SHORT_ACK     = 0x40;  // no-data / wake / cycle-close ack — M-Bus SND_NKE
-static constexpr uint8_t RX_TYPE_DATA          = 0x43;  // data response (nested-encrypted DLMS) — M-Bus SND_UD (FCV=0)
-static constexpr uint8_t RX_TYPE_SESSION_SETUP = 0x53;  // key-install blob — M-Bus SND_UD (FCV=1)
-static constexpr uint8_t RX_TYPE_REQUEST_ACK   = 0x5B;  // "got request, preparing data" — M-Bus REQ_UD2
+static constexpr uint8_t RX_TYPE_SHORT_ACK     = 0x40;  // no-data / wake / cycle-close ack - M-Bus SND_NKE
+static constexpr uint8_t RX_TYPE_DATA          = 0x43;  // data response (nested-encrypted DLMS) - M-Bus SND_UD (FCV=0)
+static constexpr uint8_t RX_TYPE_SESSION_SETUP = 0x53;  // key-install blob - M-Bus SND_UD (FCV=1)
+static constexpr uint8_t RX_TYPE_REQUEST_ACK   = 0x5B;  // "got request, preparing data" - M-Bus REQ_UD2
 
 /* ================================================================
- * RF Frame Header Offsets — OUTGOING (CIU → meter)
+ * RF Frame Header Offsets - OUTGOING (CIU -> meter)
  *
  * Total header = 15 bytes [0..14], then body starts at [15].
  * ================================================================ */
@@ -180,13 +180,13 @@ static constexpr size_t RF_TX_ENC_ZERO     = 16;  // constant 0x00
 static constexpr size_t RF_TX_ENC_COUNTER  = 17;  // 4-byte BE u32
 static constexpr size_t RF_TX_ENC_CIPHER   = 21;  // L bytes of ciphertext
 // MIC follows at [21 + L .. 21 + L + 11]
-// CRC(s) follow MIC — single CRC if total ≤ 128, dual CRC if total > 128
+// CRC(s) follow MIC - single CRC if total <= 128, dual CRC if total > 128
 
 /* ================================================================
- * RF Frame Header Offsets — INCOMING (meter → CIU)
+ * RF Frame Header Offsets - INCOMING (meter -> CIU)
  *
  * Address [2..9] is the meter's own address (device_type = 0x02).
- * Mode flags at [11]/[12] BOTH zero ⇒ plain branch.
+ * Mode flags at [11]/[12] BOTH zero => plain branch.
  * In the captured traffic all RX frames are plain at the transport layer;
  * RX type 0x43 plain payloads carry a NESTED encrypted frame inside.
  * ================================================================ */
@@ -194,8 +194,8 @@ static constexpr size_t RF_RX_LENGTH       =  0;
 static constexpr size_t RF_RX_TYPE         =  1;  // 0x40, 0x43, 0x53, 0x5B, 0x06
 static constexpr size_t RF_RX_ADDR         =  2;  // 8 bytes: meter address
 static constexpr size_t RF_RX_PASSTHROUGH  = 10;  // varies by type (0x80, 0x5B, ...)
-static constexpr size_t RF_RX_MODE_FLAG_LO = 11;  // 0 ⇒ plain branch
-static constexpr size_t RF_RX_MODE_FLAG_HI = 12;  // 0 ⇒ plain branch
+static constexpr size_t RF_RX_MODE_FLAG_LO = 11;  // 0 => plain branch
+static constexpr size_t RF_RX_MODE_FLAG_HI = 12;  // 0 => plain branch
 static constexpr size_t RF_RX_HDR_SIZE     = 13;  // bytes [0..12]
 static constexpr size_t RF_RX_PAYLOAD      = 13;  // plain payload start
 // In plain frames, CRC(s) follow payload (single or dual based on total length)
@@ -203,10 +203,10 @@ static constexpr size_t RF_RX_PAYLOAD      = 13;  // plain payload start
 /* ================================================================
  * Dual-CRC threshold
  *
- * Pre-CRC body size > 126 ⇒ insert CRC1 at offset 0x7E, CRC2 at end.
- * Equivalently: final on-air frame size > 128 ⇒ dual CRC.
+ * Pre-CRC body size > 126 => insert CRC1 at offset 0x7E, CRC2 at end.
+ * Equivalently: final on-air frame size > 128 => dual CRC.
  * ================================================================ */
-static constexpr size_t CRC_DUAL_THRESHOLD = 128;  // total size; > this ⇒ dual CRC
+static constexpr size_t CRC_DUAL_THRESHOLD = 128;  // total size; > this => dual CRC
 static constexpr size_t CRC1_OFFSET        = 0x7E; // CRC1 position in dual-CRC frames
 
 /* ================================================================
@@ -230,10 +230,10 @@ struct ObisCode {
 };
 
 /* ================================================================
- * DLMS Value — parsed response data
+ * DLMS Value - parsed response data
  * ================================================================ */
 // A parsed COSEM attribute value, kept as the RAW on-the-wire bytes plus the
-// DLMS type tag. Interpretation (→ float for sensors, → string for text
+// DLMS type tag. Interpretation (-> float for sensors, -> string for text
 // sensors) is deferred to DlmsClient::data_as_float() / data_to_string(), so
 // every consumer shares one battle-tested conversion. `dtype` is stored as the
 // raw type byte (helpers.h can't see the DlmsDataType enum); cast when used.
@@ -241,7 +241,7 @@ struct DlmsValue {
   uint8_t dtype{0x00};   // DLMS data-type tag (0x00 = null / no value)
   uint8_t raw_len{0};    // valid bytes in raw[]
   uint8_t raw[64]{};     // value bytes, big-endian as received
-  bool valid{false};     // false ⇒ NULL-data / unparsed
+  bool valid{false};     // false => NULL-data / unparsed
   bool has_value() const { return valid; }
 };
 

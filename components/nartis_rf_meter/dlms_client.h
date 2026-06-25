@@ -1,5 +1,5 @@
 /*
- * Nartis DLMS Client — Proprietary Protocol Layer
+ * Nartis DLMS Client - Proprietary Protocol Layer
  *
  * Layer 3: Builds and parses Nartis proprietary DLMS APDUs.
  * Knows protocol but NOT RF details.
@@ -64,12 +64,12 @@ class DlmsClient {
   /// Build a `get-request-with-list` APDU containing one or more attribute
   /// references. Format:
   ///   c0 03  c1  <count>
-  ///   <count × { class-id (2B BE) | OBIS (6B) | attr-id (1B) | access-sel (1B = 0x00) }>
+  ///   <count x { class-id (2B BE) | OBIS (6B) | attr-id (1B) | access-sel (1B = 0x00) }>
   /// Returns total bytes written, or 0 on error.
   size_t build_get_request_with_list(uint8_t *out, size_t max,
                                      const AttrSpec *attrs, uint8_t count);
 
-  /// Single-OBIS convenience wrapper — wraps a single attribute in the
+  /// Single-OBIS convenience wrapper - wraps a single attribute in the
   /// `with-list` form (count=1). Used for steady-state reads.
   size_t build_read_request(uint8_t *out, size_t max,
                             const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
@@ -91,7 +91,7 @@ class DlmsClient {
   /// @param len     total payload bytes
   /// @param values  caller-owned array of at least max_results DlmsValue slots
   /// @param max_results capacity of `values[]`
-  /// @param count_out actual number of results returned by the meter (≤ max_results)
+  /// @param count_out actual number of results returned by the meter (<= max_results)
   /// @return true if header parsed OK; individual result slots may carry NONE
   ///         type if their data couldn't be parsed.
   /// @param class_ids optional array (parallel to the requested attributes, in
@@ -111,7 +111,7 @@ class DlmsClient {
   static float data_as_float(DlmsDataType type, const uint8_t *data, size_t len);
 
   /// Render a raw COSEM value as a human-readable string for text sensors:
-  /// octet/visible/UTF-8 strings as ASCII, date_time as "YYYY-MM-DD HH:MM:SS…",
+  /// octet/visible/UTF-8 strings as ASCII, date_time as "YYYY-MM-DD HH:MM:SS...",
   /// numerics printed, bit-string/BCD/date/time hex-dumped.
   static void data_to_string(DlmsDataType type, const uint8_t *data, size_t len,
                              char *buffer, size_t buf_size);

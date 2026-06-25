@@ -1,4 +1,4 @@
-"""Nartis RF Meter — Numeric sensor platform."""
+"""Nartis RF Meter - Numeric sensor platform."""
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
