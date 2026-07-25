@@ -7,6 +7,7 @@
 [Пульсар-М](https://github.com/latonita/esphome-pulsar-m) •
 [Энергомера BLE](https://github.com/latonita/esphome-energomera-ble) •
 [Нартис RF433](https://github.com/latonita/esphome-nartis-rf-meter) •
+[Нартис RF433-2](https://github.com/latonita/esphome-uart-nartis-rf) •
 [Nordic UART (BLE NUS)](https://github.com/latonita/esphome-nordic-uart-ble) •
 
 ---
@@ -17,9 +18,7 @@
 
 Компонент заменяет собой выносной цифровой дисплей **Нартис Д101**: он **сопрягается** со счётчиком и далее **регулярно опрашивает** счётчик по протоколу **DLMS/COSEM**, забирая нужные показания по их OBIS-кодам. Полный список кодов можно найти в руководстве по эксплуатации дисплея Нартис Д101, а также приборов учета электроэнергии Нартис И100 и Нартис И300.
 
-**СКОРО**: Поддержка ПУ с дисплеем **Нартис Д101-2** / **RF-433-2**
-
-
+**ВАЖНО**: ПУ с дисплеем **Нартис Д101-2**, а также работающие по протоколу **RF-433-2** (большинство с 2024 г.в.) работатают с другим компонентом: [Нартис RF433-2](https://github.com/latonita/esphome-uart-nartis-rf)
 
 # Функции
 
