@@ -1,7 +1,9 @@
 /*
  * Nartis RF Meter - ESPHome Component Implementation
  *
- * Non-blocking state machine orchestrating CMT2300A HAL, RF framing, and DLMS client.
+ * Non-blocking state machine orchestrating the RadioHal backend, RF framing,
+ * and the DLMS client. Nothing below this line knows which radio chip is fitted:
+ * every exchange with it goes through radio_ (radio_hal.h).
  */
 
 #include "nartis_rf_meter.h"
@@ -29,16 +31,24 @@ void NartisRfMeterComponent::setup() {
 void NartisRfMeterComponent::setup_continue_() {
   ESP_LOGI(TAG, "Setting up Nartis RF Meter...");
 
-  hal_.set_pins(pin_sdio_, pin_sclk_, pin_csb_, pin_fcsb_, pin_gpio3_);
-  if (!hal_.init()) {
-    ESP_LOGE(TAG, "CMT2300A initialization failed!");
+  if (radio_ == nullptr) {
+    ESP_LOGE(TAG, "No radio configured");
     this->mark_failed();
     return;
   }
 
-  // One-time GPIO3/INT2 wiring self-test (decisive: RX is impossible if the
-  // chip's interrupt line isn't reaching the configured pin_gpio3).
-  hal_.test_gpio3_wiring();
+  if (!radio_->init()) {
+    ESP_LOGE(TAG, "%s initialization failed!", radio_->radio_name());
+    this->mark_failed();
+    return;
+  }
+
+  // One-time wiring self-test. On the CMT2300A this is the GPIO3/INT2 line check,
+  // and it is decisive: RX is impossible if the chip's interrupt line isn't
+  // reaching the configured pin. Advisory - the result is logged by the backend
+  // and we carry on either way, because a backend with nothing to test passes
+  // trivially and a soft failure is still worth attempting to talk through.
+  radio_->self_test();
 
   derive_rf_address_();
 
@@ -86,7 +96,7 @@ void NartisRfMeterComponent::start_cycle_() {
 void NartisRfMeterComponent::abort_to_idle_(const char *reason) {
   ESP_LOGW(TAG, "%s - returning to IDLE, will retry on next update().", reason);
   finish_rx_();
-  hal_.go_sleep();
+  radio_->go_sleep();
   note_cycle_failure_();
   // Persist whatever counter advances this (failed) cycle made so the meter
   // never sees a replayed counter after a reboot. note_cycle_failure_() may have
@@ -206,9 +216,12 @@ void NartisRfMeterComponent::save_pairing_state_() {
 
 void NartisRfMeterComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Nartis RF Meter:");
-  ESP_LOGCONFIG(TAG, "  Pins: SDIO=%d, SCLK=%d, CSB=%d, FCSB=%d, GPIO3=%d",
-                pin_sdio_->get_pin(), pin_sclk_->get_pin(), pin_csb_->get_pin(),
-                pin_fcsb_->get_pin(), pin_gpio3_->get_pin());
+  if (radio_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Radio: %s", radio_->radio_name());
+    radio_->dump_config();  // wiring and whatever else the backend wants shown
+  } else {
+    ESP_LOGCONFIG(TAG, "  Radio: NONE CONFIGURED");
+  }
   ESP_LOGCONFIG(TAG, "  Address: manufacturer_id=0x%04X, address_id=0x%08X, version=%d, type=%d",
                 address_.manufacturer_id, (unsigned) address_.address_id,
                 address_.version, address_.device_type);
@@ -218,6 +231,9 @@ void NartisRfMeterComponent::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Channel: RSSI auto-scan");
   }
+  ESP_LOGCONFIG(TAG, "  Channel mode: %s (TX %.3f MHz / RX follows the advertised channel)",
+                use_alternative_channels_ ? "alternative" : "default",
+                channel_tx_hz(active_channel_, use_alternative_channels_) / 1e6f);
   ESP_LOGCONFIG(TAG, "  Sensors: %d registered", (int) sensors_.size());
 
   for (size_t i = 0; i < sensors_.size(); i++) {
@@ -385,8 +401,8 @@ void NartisRfMeterComponent::handle_state_() {
       break;
 
     case State::PAIR_PROBE_WAIT_RESPONSE: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
         int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
@@ -423,7 +439,7 @@ void NartisRfMeterComponent::handle_state_() {
           rx_parse_retries_ = 0;
           set_state_(State::PAIR_PROBE_TX);  // retry TX
         }
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         ESP_LOGW(TAG, "Pairing: no probe response");
         rx_parse_retries_ = 0;
         set_state_(State::PAIR_PROBE_TX);  // retry (bounded in handler)
@@ -440,8 +456,8 @@ void NartisRfMeterComponent::handle_state_() {
       break;
 
     case State::PAIR_ACK_WAIT_RESPONSE: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
         int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
@@ -505,7 +521,7 @@ void NartisRfMeterComponent::handle_state_() {
           rx_parse_retries_ = 0;
           set_state_(State::PAIR_ACK_TX);  // retry TX
         }
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         ESP_LOGW(TAG, "Pairing: no SESSION_SETUP response");
         rx_parse_retries_ = 0;
         set_state_(State::PAIR_ACK_TX);  // retry (bounded in handler)
@@ -522,8 +538,8 @@ void NartisRfMeterComponent::handle_state_() {
       break;
 
     case State::PAIR_WAIT_READY: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
         int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
@@ -544,7 +560,7 @@ void NartisRfMeterComponent::handle_state_() {
           rx_parse_retries_ = 0;
           set_state_(State::WAKE_BEACON_TX);
         }
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         // Keepalive is the meter's "I'm ready" nudge; if we miss it, still
         // consider pairing done and try the beacon poll (it has its own retry).
         ESP_LOGW(TAG, "Pairing: no keepalive - proceeding to beacon anyway");
@@ -564,8 +580,8 @@ void NartisRfMeterComponent::handle_state_() {
       break;
 
     case State::WAKE_WAIT_ACK: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         ESP_LOGI(TAG, "Beacon response received (%d bytes)", (int) rx_accum_len_);
         uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
@@ -621,7 +637,7 @@ void NartisRfMeterComponent::handle_state_() {
           rx_parse_retries_ = 0;
           set_state_(State::ERROR_RECOVERY);
         }
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         // No reply at all within the RX window. Re-send the beacon a couple of
         // times within the session before giving up - a single frame lost to RF
         // noise shouldn't fail the whole read cycle.
@@ -650,8 +666,8 @@ void NartisRfMeterComponent::handle_state_() {
     // Step 1: meter must reply with 0x5B keepalive ("I got your request, hang on").
     // Short 25-byte plain frame.
     case State::READ_WAIT_REQUEST_ACK: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         if (raw_type == RX_TYPE_REQUEST_ACK) {
           ESP_LOGV(TAG, "GET cycle: meter ack'd request (0x5B), requesting data via BEACON");
@@ -667,7 +683,7 @@ void NartisRfMeterComponent::handle_state_() {
           ESP_LOGW(TAG, "GET cycle: unexpected response to get-request (type=0x%02X)", raw_type);
           set_state_(State::READ_REQUEST_TX);  // retry whole get-request
         }
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         ESP_LOGD(TAG, "GET cycle: no reply yet (start=%u, n=%u) - re-sending",
                  batch_start_idx_, batch_count_);
         retry_count_++;
@@ -707,8 +723,8 @@ void NartisRfMeterComponent::handle_state_() {
 
     // Step 3: meter sends 0x43 RESPONSE carrying the data (nested-encrypted body).
     case State::READ_WAIT_DATA: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         if (raw_type == RX_TYPE_DATA) {
           handle_data_response_();
@@ -734,7 +750,7 @@ void NartisRfMeterComponent::handle_state_() {
             set_state_(State::READ_POLL_BEACON_TX);
           }
         }
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         ESP_LOGD(TAG, "GET cycle: no data response yet (batch start=%u) - re-sending", batch_start_idx_);
         retry_count_++;
         if (retry_count_ >= GET_REPLY_MAX_RETRIES_) {
@@ -765,12 +781,12 @@ void NartisRfMeterComponent::handle_state_() {
 
     // Step 5: meter replies with 0x40 short ack - cycle complete.
     case State::READ_WAIT_CLOSE_ACK: {
-      RxStatus status = poll_rx_();
-      if (status == RxStatus::COMPLETE) {
+      RxPoll status = poll_rx_();
+      if (status == RxPoll::RX_POLL_COMPLETE) {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         ESP_LOGD(TAG, "GET cycle: final ack (type=0x%02X) - moving on", raw_type);
         advance_after_get_();
-      } else if (status == RxStatus::ERROR) {
+      } else if (rx_failed_(status)) {
         // No final ack - data was already received and parsed; treat as soft success.
         ESP_LOGD(TAG, "GET cycle: no final ack, but data was received - advancing anyway");
         advance_after_get_();
@@ -791,23 +807,48 @@ void NartisRfMeterComponent::handle_state_() {
   }
 }
 
+/* The stock device's own survey, for reference - this is what the removed
+ * Cmt2300aHal::scan_channels() reproduced, and the only record of it now:
+ *   per channel: RSSI mode on -> enter RX -> 2 ms settle -> 1 warm-up sample,
+ *                then 6 more samples 2 ms apart,
+ *                score = (sum_of_6 - max - min) / 4  (trimmed mean of the middle 4),
+ *                no absolute threshold - channels are only ranked,
+ *                and channel 0's score is computed but never compared, so the
+ *                stock device can never select it.
+ * The survey below is the component's own: 7 samples, trimmed mean of the
+ * middle 5, and every channel eligible. */
 void NartisRfMeterComponent::handle_rssi_scan_() {
   if (rssi_scan_ch_ == 0) {
     ESP_LOGD(TAG, "Scanning RSSI on 4 channels...");
   }
 
-  hal_.set_frequency_channel(rssi_scan_ch_);
-  hal_.go_standby();
-  hal_.set_rssi_mode(true);  // RSSI-valid mode so get_rssi_dbm() reads real values
-  hal_.go_rx();
+  // Survey the channel's RX carrier - the frequency the meter would reply on.
+  // The TX carrier is irrelevant here: nothing is transmitted during the scan.
+  radio_->set_rx_frequency(channel_rx_hz(rssi_scan_ch_));
+  radio_->go_standby();
+  radio_->set_rssi_mode(true);  // RSSI-valid mode so get_rssi_dbm() reads real values
+  // The survey needs the receiver running, not a receive epoch - nothing is
+  // drained here - but begin_rx() is the only way in, and its extra FIFO/flag
+  // work is harmless while nothing is listening for a frame.
+  //
+  // A failure is logged and the sampling runs anyway, which is what the old
+  // go_rx() call did by ignoring its own return. Not escalated here on purpose:
+  // this score only ever reaches the meter as an advisory channel-quality byte
+  // (set_channel_quality) - no channel is actually chosen from it - so a bad
+  // reading costs nothing, while inventing a sentinel score would put a made-up
+  // number on the air.
+  if (!radio_->begin_rx()) {
+    ESP_LOGW(TAG, "RSSI scan: could not enter RX on ch%u - its score will be meaningless",
+             rssi_scan_ch_);
+  }
 
   // Take 7 readings with 2ms spacing (matching the meter)
   int8_t readings[7];
   for (int i = 0; i < 7; i++) {
     esphome::delay(2);
-    readings[i] = hal_.get_rssi_dbm();
+    readings[i] = radio_->get_rssi_dbm();
   }
-  hal_.go_standby();
+  radio_->go_standby();
 
   int8_t min_r = readings[0], max_r = readings[0];
   int sum = 0;
@@ -822,7 +863,7 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 
   rssi_scan_ch_++;
   if (rssi_scan_ch_ >= NUM_CHANNELS) {
-    hal_.set_rssi_mode(false);  // restore merged-FIFO mode for TX/RX
+    radio_->set_rssi_mode(false);  // restore the backend's normal packet-I/O config
     rssi_scan_ch_ = 0;
     set_state_(State::CHANNEL_SELECT);
   }
@@ -830,12 +871,12 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 
 void NartisRfMeterComponent::handle_channel_select_() {
   // The advertised channel index in frame[12] bits 7:6 COMMANDS the meter's
-  // reply frequency. The meter
-  // answers on a per-channel frequency (NARTIS_CUSTOM_CHANNELS) and the CIU
-  // listens there; TX always stays on Ch0/433.82 (the meter's wake freq). So the
-  // advertised channel and our RX channel MUST be the SAME index - then the meter
-  // replies exactly where we listen. We default to ch2 (434.26, proven), and the
-  // hop fallback moves advertised+RX together (hop_channel_).
+  // reply frequency. The meter answers on that channel's carrier
+  // (channel_rx_hz) and the CIU listens there; in alternative-channel mode TX
+  // always stays on Ch0/433.82 (the meter's wake freq). So the advertised
+  // channel and our RX channel MUST be the SAME index - then the meter replies
+  // exactly where we listen. We default to ch2 (434.26, proven), and the hop
+  // fallback moves advertised+RX together (hop_channel_).
   channel_locked_ = false;
   channel_hop_count_ = 0;
   if (fix_channel_ >= 0) {
@@ -848,12 +889,14 @@ void NartisRfMeterComponent::handle_channel_select_() {
   // Advertise the channel we listen on, so the meter replies on our RX freq.
   rf_.set_channel_quality(ch, rssi_readings_[ch]);
 
-  // Full bank write (re-locks the PLL). Every custom entry has TX-half=433.82,
-  // so this keeps TX on the probe frequency while RX = the channel's reply freq.
-  hal_.set_frequency_channel(ch);
+  // Program both carriers. In alternative mode channel_tx_hz() returns
+  // ch0/433.82 whatever `ch` is, so TX stays on the probe frequency while RX
+  // moves to the channel's reply carrier; in default mode both follow `ch`.
+  radio_->set_frequency(channel_tx_hz(ch, use_alternative_channels_));
+  radio_->set_rx_frequency(channel_rx_hz(ch));
 
-  ESP_LOGI(TAG, "Channel: TX 433.82, advertise+RX ch%u (%.3f MHz)%s",
-           ch, active_rx_freq_mhz_(),
+  ESP_LOGI(TAG, "Channel: TX %.3f MHz, advertise+RX ch%u (%.3f MHz)%s",
+           channel_tx_hz(ch, use_alternative_channels_) / 1e6f, ch, active_rx_freq_mhz_(),
            (fix_channel_ >= 0) ? " (fix_channel)" : " (default ch2, hop fallback)");
 
   // First contact requires the pairing handshake; once paired this boot we
@@ -872,10 +915,12 @@ bool NartisRfMeterComponent::hop_channel_() {
   }
   active_channel_ = static_cast<uint8_t>((active_channel_ + 1) % NUM_CHANNELS);
   // Move advertised channel AND RX together: advertising channel N makes the
-  // meter reply on channel N's frequency, which is where set_frequency_channel
-  // tunes RX. Full bank write re-locks the PLL; TX stays on 433.82 (all custom
-  // entries share TX-half=433.82).
-  hal_.set_frequency_channel(active_channel_);
+  // meter reply on channel N's carrier, which is where set_rx_frequency() tunes
+  // us. TX is reprogrammed too so the two modes stay consistent - in
+  // alternative mode that is a no-op write of ch0/433.82, in default mode TX
+  // follows the hop as it always did.
+  radio_->set_frequency(channel_tx_hz(active_channel_, use_alternative_channels_));
+  radio_->set_rx_frequency(channel_rx_hz(active_channel_));
   rf_.set_channel_quality(active_channel_, rssi_readings_[active_channel_]);
   channel_hop_count_++;
   ESP_LOGI(TAG, "No reply - hopping advertise+RX to channel %u (%.3f MHz), hop %u/%u",
@@ -893,11 +938,21 @@ void NartisRfMeterComponent::lock_channel_() {
 }
 
 float NartisRfMeterComponent::active_rx_freq_mhz_() const {
-  // RX-half centre of each channel, mirroring the byte tables in cmt2300a_defs.h.
-  static constexpr float RX_FREQ_DEFAULT[NUM_CHANNELS] = {434.10f, 433.58f, 434.54f, 434.98f};
-  static constexpr float RX_FREQ_ALTERNATIVE[NUM_CHANNELS]   = {433.82f, 433.30f, 434.26f, 434.70f};  // meter reply freqs = std TX-halves
-  const uint8_t ch = (active_channel_ < NUM_CHANNELS) ? active_channel_ : 0;
-  return use_alternative_channels_ ? RX_FREQ_ALTERNATIVE[ch] : RX_FREQ_DEFAULT[ch];
+  // Derived from the single channel table in radio_hal.h rather than from a
+  // hand-mirrored copy, so the numbers cannot drift apart from the ones actually
+  // programmed into the radio.
+  //
+  // CORRECTION, flagged rather than slipped in: the two float tables this
+  // replaces disagreed with each other about what "RX frequency" meant. The
+  // alternative row held the carriers (433.82 / 433.30 / 434.26 / 434.70), but
+  // the default row held {434.10, 433.58, 434.54, 434.98} - the CMT2300A's
+  // LOCAL OSCILLATOR, which sits one low-IF step (282608 Hz) above the carrier.
+  // So in default mode this log line has always printed a frequency ~280 kHz
+  // above the one being received. Both modes receive the SAME carrier for a
+  // given channel - only the TX carrier differs between them - so there is one
+  // number to report, and it is the carrier. This changes a log string only; no
+  // register write is affected.
+  return channel_rx_hz(active_channel_) / 1e6f;
 }
 
 /*
@@ -1082,20 +1137,26 @@ void NartisRfMeterComponent::handle_beacon_tx_() {
   }
 }
 
+/* Now a formality, and deliberately kept as one.
+ *
+ * RadioHal::transmit() blocks until the chip reports the packet sent (or its own
+ * ~600 ms cap expires) and parks the chip before returning, and a transmit that
+ * did not complete is already reported as `false` by transmit_frame_(), whose
+ * every caller goes straight to ERROR_RECOVERY. So by the time this state is
+ * entered the transmission is over and there is nothing left to wait for or to
+ * poll: this used to read the chip's TX_DONE flag and clear it, and now neither
+ * is possible or needed - clearing it is begin_rx()'s job at the start of the
+ * next receive epoch.
+ *
+ * The WAIT_TX_DONE states are kept rather than removed because they are woven
+ * through the state machine: seven call sites name them, the state-name logging
+ * reads them back, and the pacing gates in the TX handlers are written against
+ * state_entered_ms_ of the state that follows them. Collapsing them is a
+ * separate change with its own risk; satisfying them trivially is not. */
 void NartisRfMeterComponent::handle_wait_tx_done_(State next_state) {
-  uint32_t elapsed = esphome::millis() - state_entered_ms_;
-
-  if (hal_.is_tx_done()) {
-    ESP_LOGD(TAG, "TX complete");
-    hal_.clear_interrupt_flags();
-
-    start_rx_();
-
-    set_state_(next_state);
-  } else if (elapsed > 1000) {
-    ESP_LOGW(TAG, "TX timeout");
-    set_state_(State::ERROR_RECOVERY);
-  }
+  ESP_LOGD(TAG, "TX complete");
+  start_rx_();
+  set_state_(next_state);
 }
 
 
@@ -1437,17 +1498,19 @@ void NartisRfMeterComponent::handle_publish_() {
     }
   }
 
-  hal_.go_sleep();
+  radio_->go_sleep();
   set_state_(State::IDLE);
   ESP_LOGI(TAG, "Read cycle complete (%.1f s)", session_ms / 1000.0f);
 }
 
 void NartisRfMeterComponent::handle_error_recovery_() {
   ESP_LOGW(TAG, "Error recovery - resetting radio");
+  // finish_rx_() already parks the radio. The explicit interrupt-flag and FIFO
+  // clears that used to follow it are gone: both are now part of begin_rx(),
+  // which the next cycle runs before it listens for anything, and neither has a
+  // caller-visible effect while the chip is parked in standby.
   finish_rx_();
-  hal_.go_standby();
-  hal_.clear_interrupt_flags();
-  hal_.clear_fifo();
+  radio_->go_standby();
 
   // Soft recovery: sleep the radio, account the failure, and return to IDLE so
   // the next update() retries (re-pairing after MAX_READ_FAILURES_BEFORE_REPAIR_
@@ -1459,9 +1522,10 @@ bool NartisRfMeterComponent::transmit_frame_(RfFrameType type,
                                              const uint8_t *frame, size_t len) {
   ESP_LOGD(TAG, "TX frame (%d bytes, type=0x%02X):", (int) len, static_cast<uint8_t>(type));
   ESP_LOGV(TAG, "TX: %s", format_hex_pretty(frame, len).c_str());
-  // Use chunked TX for all frames - handles packets > 64 bytes
-  // (AARQ can be ~80-100B after CRC framing, beacons ~60-70B)
-  return hal_.transmit_chunked(frame, len);
+  // One call for all frames - the backend chunks as its FIFO requires, and
+  // blocks until the frame is out (AARQ can be ~80-100B after CRC framing,
+  // beacons ~60-70B).
+  return radio_->transmit(frame, len);
 }
 
 void NartisRfMeterComponent::derive_rf_address_() {
@@ -1595,49 +1659,56 @@ void NartisRfMeterComponent::build_rtc_timestamp_(uint8_t *out) {
 void NartisRfMeterComponent::start_rx_() {
   rx_accum_len_ = 0;
   rx_expected_len_ = 0;
-  rx_active_ = true;
-
-  hal_.go_standby();
-
-  // CRITICAL: the preceding TX left the merged FIFO in TX direction with the
-  // 64-byte beacon still "occupying" it. Switch the merged FIFO back to RX
-  // direction FIRST, then fully reset it (clear + RESTORE pointers) - otherwise
-  // RX starts against a FIFO that already reads full/overflowed (FIFO_FLAG=0xFF)
-  // and we drain stale garbage. Order matters: direction -> restore -> clear.
-  hal_.prepare_rx_session();   // RX FIFO direction + SDIO input
-  hal_.reset_rx_fifo_full();   // FIFO_RESTORE + clear RX/TX
-  hal_.clear_interrupt_flags();
-
-  // Route the INT line -> RX_FIFO_TH (the meter's RX mechanism). The pin
-  // goes HIGH while >= FIFO_TH_VALUE bytes await in the RX FIFO; we drain
-  // threshold chunks on that, and read the trailing sub-threshold bytes by
-  // frame length. (TX left it on TX_FIFO_TH; this restores it for RX.)
-  hal_.set_int_source(INT_SEL_RX_FIFO_TH);
-  // Restore PAYLOAD_LENG to the large ceiling: the preceding TX shrank it to the
-  // TX frame size, which would otherwise cap this RX at (TX_len + 1) bytes and
-  // truncate the meter's longer reply (e.g. 45/66, 75/93).
-  hal_.set_rx_payload_length();
   rx_tail_wait_ms_ = 0;
   rx_drain_stall_ms_ = 0;
 
-  // Enter RX mode: STBY -> RFS -> RX
-  hal_.write_reg(REG_MODE_CTL, GO_RFS);
-  hal_.wait_for_state(STA_RFS);
-  hal_.write_reg(REG_MODE_CTL, GO_RX);
-  hal_.wait_for_state(STA_RX);
+  // Everything the old inline sequence did - park, flip the FIFO back to RX in
+  // the one order that works, clear the latched flags, repoint the interrupt mux
+  // at the receive threshold, restore the payload-length ceiling, and confirm
+  // RFS then RX - now lives in the backend's begin_rx(), together with the
+  // comment explaining why that order is load-bearing.
+  const bool armed = radio_->begin_rx();
+
+  // rx_active_ is set either way, on purpose. If the radio could not reach RX it
+  // reports RX_STATUS_NOT_IN_RX on the very first drain, so the attempt is
+  // abandoned through the ordinary fault path - counted, named and logged -
+  // rather than being silently indistinguishable from a meter that said nothing.
+  rx_active_ = true;
+  if (!armed) {
+    ESP_LOGW(TAG, "RX could not be armed on ch%u - the next poll will report the fault",
+             active_channel_);
+    return;
+  }
 
   ESP_LOGD(TAG, "RX started on ch%u (%.3f MHz%s)",
            active_channel_, active_rx_freq_mhz_(), channel_locked_ ? ", locked" : "");
 }
 
-NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
-  if (!rx_active_) return RxStatus::ERROR;
+NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
+  if (!rx_active_) return RxPoll::RX_POLL_ERROR;
 
   uint32_t elapsed = esphome::millis() - state_entered_ms_;
 
-  // Drain whatever the chip has in its FIFO right now (SPI poll, once per loop).
-  size_t drained = hal_.poll_rx_drain(rx_accum_buf_ + rx_accum_len_,
-                                      MAX_RF_FRAME_SIZE - rx_accum_len_);
+  // Drain whatever the radio has right now (one poll per loop). The status says
+  // what a zero return MEANS - the difference between a meter that has not
+  // answered yet and a radio that can no longer hear one.
+  RxStatus status = RxStatus::RX_STATUS_NO_DATA;
+  size_t drained = radio_->drain_rx(rx_accum_buf_ + rx_accum_len_,
+                                    MAX_RF_FRAME_SIZE - rx_accum_len_, status);
+  if (status != RxStatus::RX_STATUS_DATA && status != RxStatus::RX_STATUS_NO_DATA) {
+    // The epoch is over whatever is already in the buffer: an overflow lost the
+    // middle of the frame, and the other statuses mean the radio is not
+    // listening. Any bytes held are a fragment, so there is nothing to parse and
+    // nothing to gain from sitting out the rest of the receive timeout - this
+    // attempt was already lost, and the retry path gets the time back.
+    radio_error_count_++;
+    ESP_LOGW(TAG, "Radio reported %s after %d byte(s) - abandoning this attempt (%u total)",
+             LOG_STR_ARG(rx_status_to_string_(status)), (int) rx_accum_len_,
+             (unsigned) radio_error_count_);
+    finish_rx_();
+    return RxPoll::RX_POLL_FAULT;
+  }
+
   if (drained > 0) {
     const bool first_bytes = (rx_accum_len_ == 0);
     rx_accum_len_ += drained;
@@ -1659,34 +1730,34 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
     if (rx_expected_len_ > MAX_RF_FRAME_SIZE) {
       ESP_LOGW(TAG, "RX frame too large: %d bytes", (int) rx_expected_len_);
       finish_rx_();
-      return RxStatus::ERROR;
+      return RxPoll::RX_POLL_ERROR;
     }
     ESP_LOGVV(TAG, "RX expecting %d bytes total", (int) rx_expected_len_);
   }
 
-  // Tail read: the final < FIFO_TH_VALUE bytes never raise RX_FIFO_TH, so the
-  // chunk-drain can't fetch them. Once only the sub-threshold tail remains,
-  // read it directly by length after a brief wait so those bytes have arrived.
+  // Tail read: a run shorter than the backend's drain granularity never raises
+  // its threshold signal, so drain_rx() can't fetch it. Once only that
+  // sub-threshold tail remains, read it directly by length after a brief wait so
+  // those bytes have arrived. A backend whose FIFO reports an exact count sets
+  // rx_chunk_size() to 1, and this branch then never fires.
   if (rx_expected_len_ > 0 && rx_accum_len_ < rx_expected_len_) {
     size_t remaining = rx_expected_len_ - rx_accum_len_;
-    if (remaining < FIFO_TH_VALUE) {
+    if (remaining < radio_->rx_chunk_size()) {
       if (rx_tail_wait_ms_ == 0) {
         rx_tail_wait_ms_ = esphome::millis();
       } else if (esphome::millis() - rx_tail_wait_ms_ >= RX_TAIL_WAIT_MS_) {
-        hal_.read_fifo(rx_accum_buf_ + rx_accum_len_, remaining);
-        rx_accum_len_ += remaining;
+        rx_accum_len_ += radio_->read_rx_exact(rx_accum_buf_ + rx_accum_len_, remaining);
       }
     } else if (drained == 0 && rx_drain_stall_ms_ != 0 &&
                esphome::millis() - rx_drain_stall_ms_ >= RX_DRAIN_STALL_MS_) {
-      // A full chunk (>= FIFO_TH_VALUE) is still owed but the chunk-drain has
-      // found nothing for RX_DRAIN_STALL_MS_: the chip finished receiving and
+      // A full chunk is still owed but the drain has found nothing for
+      // RX_DRAIN_STALL_MS_: on the CMT2300A the chip finished receiving and
       // de-asserted RX_FIFO_TH with the remainder still unread (the 45/66,
       // 75/93 stall). Those bytes are sitting in the 64 B FIFO - read them
       // directly by length. CRC downstream rejects it if sync was truly lost.
       ESP_LOGD(TAG, "RX drain stalled at %d/%d - reading %d remaining from FIFO",
                (int) rx_accum_len_, (int) rx_expected_len_, (int) remaining);
-      hal_.read_fifo(rx_accum_buf_ + rx_accum_len_, remaining);
-      rx_accum_len_ += remaining;
+      rx_accum_len_ += radio_->read_rx_exact(rx_accum_buf_ + rx_accum_len_, remaining);
     }
   }
 
@@ -1730,13 +1801,13 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
     }
 
     finish_rx_();
-    return RxStatus::COMPLETE;
+    return RxPoll::RX_POLL_COMPLETE;
   }
 
   if (rx_accum_len_ >= MAX_RF_FRAME_SIZE) {
     ESP_LOGW(TAG, "RX buffer overflow (%d bytes)", (int) rx_accum_len_);
     finish_rx_();
-    return RxStatus::ERROR;
+    return RxPoll::RX_POLL_ERROR;
   }
 
   // Check timeout. In the steady-state GET reply waits, use a short timeout so a
@@ -1759,17 +1830,40 @@ NartisRfMeterComponent::RxStatus NartisRfMeterComponent::poll_rx_() {
                (int) rx_expected_len_, (int) elapsed);
     }
     finish_rx_();
-    return RxStatus::ERROR;
+    return RxPoll::RX_POLL_ERROR;
   }
 
-  return RxStatus::IN_PROGRESS;
+  return RxPoll::RX_POLL_IN_PROGRESS;
+}
+
+// Spelled out rather than printed as a number: these lines are what a user
+// pastes into a bug report, and "radio no longer in RX" tells them to look at
+// the wiring and the loop rate where "status 4" tells them nothing.
+const LogString *NartisRfMeterComponent::rx_status_to_string_(RxStatus status) {
+  switch (status) {
+    case RxStatus::RX_STATUS_DATA:
+      return LOG_STR("data");
+    case RxStatus::RX_STATUS_NO_DATA:
+      return LOG_STR("no data yet");
+    case RxStatus::RX_STATUS_OVERFLOW:
+      return LOG_STR("RX FIFO overflow");
+    case RxStatus::RX_STATUS_IO_ERROR:
+      return LOG_STR("SPI I/O error");
+    case RxStatus::RX_STATUS_NOT_IN_RX:
+      return LOG_STR("radio no longer in RX");
+    default:
+      return LOG_STR("UNKNOWN");
+  }
 }
 
 void NartisRfMeterComponent::finish_rx_() {
   if (!rx_active_) return;
 
-  hal_.go_standby();
-  hal_.clear_interrupt_flags();
+  // Parking ends the epoch. The interrupt-flag clear that used to follow is
+  // begin_rx()'s job now: clearing at the START of the next epoch is what makes
+  // the guarantee "the first flag seen belongs to this epoch" true, where
+  // clearing at the end of the previous one left a window.
+  radio_->go_standby();
 
   rx_active_ = false;
 }
