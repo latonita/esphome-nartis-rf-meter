@@ -35,14 +35,62 @@ external_components:
     components: [nartis_rf_meter]
     refresh: 1s
 
-# CMT2300A RF transceiver wiring (ESP32 GPIOs - adjust to your board).
+# Radio wiring (ESP32 GPIOs - adjust to your board).
 nartis_rf_meter:
   id: nartis
-  pin_sdio: GPIO23
-  pin_sclk: GPIO18
-  pin_csb: GPIO27
-  pin_fcsb: GPIO26
-  pin_gpio3: GPIO14               # INT2 - обязательно
+
+  # CMT2300A on a bit-banged 3-wire SPI. This is the proven backend.
+  radio:
+    type: cmt2300a
+    pin_sdio: GPIO23
+    pin_sclk: GPIO18
+    pin_csb: GPIO27
+    pin_fcsb: GPIO26
+    pin_gpio3: GPIO14             # INT2 - обязательно
+
+  # ...or a TI CC1101 on a normal 4-wire SPI instead. Same PHY, different chip -
+  # but UNPROVEN on hardware so far, and ~4 dB weaker on transmit than a real
+  # Nartis D101 display (see README). Comment out the block above to use this one.
+  # radio:
+  #   type: cc1101
+  #   pin_sclk: GPIO18
+  #   pin_miso: GPIO19
+  #   pin_mosi: GPIO23
+  #   pin_cs: GPIO5
+  #   pin_gdo0: GPIO22            # optional; without it the driver polls over SPI
+  #   rx_offset: 0Hz              # signed, Hz. TX and RX are tuned independently
+  #                               # here; both frequencies are printed at boot.
+  #   output_power: 10            # dBm, -30..+10. 10 is the chip's maximum at
+  #                               # 433 MHz and still ~4 dB under a real display.
+  #   bandwidth: 101562Hz         # 58kHz..812kHz. The default is sized for crystal
+  #                               # offset (FOC reaches only +-BW/4), not for the
+  #                               # ~17 kHz the signal actually occupies.
+  #   deviation: 6kHz             # the protocol's value - leave it alone
+  #   modulation: 2fsk            # or gfsk, which is what a real D101 transmits.
+  #                               # Affects TX only; try it if the meter cannot
+  #                               # hear us.
+  #   foc_carrier_sense_gate: true
+  #                               # bring-up knob, default false. Try this FIRST if
+  #                               # the meter is heard (RSSI moves, bytes arrive)
+  #                               # but the replies never decode: it freezes the
+  #                               # frequency and bit-sync loops until carrier
+  #                               # sense asserts, instead of letting them track
+  #                               # noise through a multi-second wait. The other
+  #                               # way round it can lose a weak reply entirely -
+  #                               # judge by the rate of CRC-valid replies, not by
+  #                               # bytes seen.
+  #   sync_word: 0xF672           # the two bytes the correlator matches, high byte
+  #                               # first on air. The full on-air sync word is
+  #                               # 55 55 F6 72 and its leading 55 55 merges with
+  #                               # the preamble, so these two are all the chip
+  #                               # needs. The byte order is derived from the CIU
+  #                               # register capture, not yet seen on air: if
+  #                               # NOTHING is ever received - no bytes at all, at
+  #                               # any foc_carrier_sense_gate setting - try
+  #                               # 0x72F6, the reversed order that
+  #                               # fw/RF_PHY_SPEC.md sec. 4.4 states. That is the
+  #                               # only other value worth trying.
+
   meter_serial: "012345678901"    # 12 цифр с шильдика счётчика
   use_alternative_channels: true  # альтернативная сетка частот (если счётчик не отвечает)
   batch_size: 10                  # читать до 10 атрибутов одним запросом
