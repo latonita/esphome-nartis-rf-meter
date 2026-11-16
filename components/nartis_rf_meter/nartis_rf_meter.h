@@ -83,11 +83,14 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// Overrides serial/MAC derivation - use to impersonate a paired CIU exactly.
   void set_ciu_address(const std::string &hex) { ciu_address_ = hex; }
 
-  /// Pin the active-mode physical channel (0..3), bypassing the RSSI auto-scan.
-  /// The meter transmits/listens on a fixed bank (channel 0) and only encodes
-  /// the scanned index as a frame hint, so forcing the channel here is the lever
-  /// to match the meter when auto-select tunes to the wrong frequency.
-  void set_fix_channel(uint8_t ch) { fix_channel_ = static_cast<int8_t>(ch & 0x3); }
+  /// Pin the meter reply channel (1..3), bypassing the RSSI auto-scan.
+  /// CIU->meter TX is always on CH0/433.82 MHz regardless of this setting.
+  /// Channel 0 is not a valid reply channel and is mapped to the default (2).
+  void set_fix_channel(uint8_t ch) {
+    fix_channel_ = (ch >= FIRST_REPLY_CHANNEL && ch <= LAST_REPLY_CHANNEL)
+                       ? static_cast<int8_t>(ch)
+                       : static_cast<int8_t>(DEFAULT_REPLY_CHANNEL);
+  }
 
   /// Use the alternative channel mode instead of the default channel grid: TX
   /// stays on ch0/433.82 (the meter's wake frequency) while RX follows the
@@ -100,6 +103,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// The radio is not told about this flag: it only ever receives carriers in Hz
   /// from channel_tx_hz()/channel_rx_hz() (radio_hal.h), which is where the two
   /// modes differ.
+  /// DEPRECATED: TX is now always CH0/433.82; the flag no longer changes carriers.
   void set_use_alternative_channels(bool enable) { use_alternative_channels_ = enable; }
 
   /// User-defined OBIS attributes read per get-request-with-list (1..10). Larger

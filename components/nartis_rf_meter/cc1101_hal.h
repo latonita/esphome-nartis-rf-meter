@@ -112,6 +112,14 @@ class Cc1101Hal : public RadioHal {
   /// normally nothing to correct by hand.
   void set_rx_offset_hz(int32_t hz) { this->rx_offset_hz_ = hz; }
 
+  /// Crystal-error correction in Hz, added to BOTH the TX and RX carriers. Cheap
+  /// CC1101 modules can sit 20-40 ppm off (9-17 kHz at 433.8 MHz), which is more
+  /// than RF433-1's +-6 kHz deviation: the meter's CMT2300A then sees both FSK tones
+  /// on one side of centre and decodes nothing. Measure the error (SDR, or the
+  /// FREQEST line logged when a reply is received). FREQEST is (received carrier - our
+  /// tuning), so the correction is ADDED: new freq_offset = current freq_offset + FREQEST_Hz.
+  void set_freq_offset_hz(int32_t hz) { this->freq_offset_hz_ = hz; }
+
   /// Requested PA output power in dBm, snapped to the nearest 433 MHz PATABLE entry
   /// (-30, -20, -15, -10, 0, +5, +7, +10). Defaults to +10, the chip's maximum.
   ///
@@ -189,6 +197,13 @@ class Cc1101Hal : public RadioHal {
   /// programmed into the correlator and nowhere else.
   void set_sync_word(uint16_t sync_word) { this->sync_word_ = sync_word; }
 
+  /// Number of 0x55 preamble bytes written to the FIFO ahead of the sync word on TX.
+  void set_tx_preamble_bytes(uint8_t n) {
+    this->tx_preamble_bytes_ = (n < CC1101_TX_PREAMBLE_MIN)   ? CC1101_TX_PREAMBLE_MIN
+                               : (n > CC1101_TX_PREAMBLE_MAX) ? CC1101_TX_PREAMBLE_MAX
+                                                              : n;
+  }
+
   /// TRANSMIT carrier, Hz. Runtime-settable: the component re-tunes between
   /// exchanges when it hops channels. Programmed into FREQ2/1/0 by transmit(), which
   /// has already parked the chip in IDLE - the synthesiser registers cannot be
@@ -258,6 +273,7 @@ class Cc1101Hal : public RadioHal {
   size_t max_drain_chunk() const override { return CC1101_FIFO_SIZE; }
 
   int8_t get_rssi_dbm() override;
+  int8_t rx_peak_rssi_dbm() const override { return this->rx_peak_rssi_dbm_; }
 
   bool go_standby() override;
 
@@ -398,6 +414,22 @@ class Cc1101Hal : public RadioHal {
   /// The component relies on this: it does not escalate a false return from
   /// begin_rx(), it waits for the next drain to report NOT_IN_RX.
   bool rx_epoch_armed_{false};
+  /// Diagnostics for the current receive epoch, reset by begin_rx(): the peak RSSI
+  /// sampled on every drain_rx() poll, and whether FREQEST has been logged yet.
+  int8_t rx_peak_rssi_dbm_{RSSI_UNKNOWN};
+  bool rx_freqest_logged_{false};
+  // Mid-frame bookkeeping for the stalled-sync recovery in drain_rx().
+  size_t rx_taken_{0};           // bytes handed to the caller this epoch
+  size_t rx_expected_total_{0};  // LEN + 1 once the first byte is known, else 0
+  uint32_t rx_first_ms_{0};      // millis() when the first byte was handed over
+  uint32_t rx_last_ms_{0};       // millis() when the latest bytes were handed over
+  /// True once solve_params_() has run, so dump_config() - which ESPHome calls before
+  /// the component's deferred init - can solve on demand instead of printing zeros.
+  bool params_solved_{false};
+  /// TX carrier actually tuned: the channel's TX carrier plus freq_offset_hz_.
+  uint32_t tx_tuned_hz_() const;
+  /// RSSI register -> dBm (datasheet sec. 17.3). No SPI-error handling; callers do it.
+  int8_t read_rssi_dbm_();
   void clear_spi_error_() { this->spi_not_ready_ = false; }
   bool spi_error_() const { return this->spi_not_ready_; }
 
@@ -440,6 +472,7 @@ class Cc1101Hal : public RadioHal {
   uint32_t freq_hz_{CC1101_DEFAULT_FREQUENCY_HZ};
   uint32_t rx_freq_hz_{CC1101_DEFAULT_FREQUENCY_HZ};
   int32_t rx_offset_hz_{CC1101_DEFAULT_RX_OFFSET_HZ};
+  int32_t freq_offset_hz_{0};
   int8_t output_power_dbm_{CC1101_DEFAULT_OUTPUT_POWER_DBM};
   uint32_t rx_bandwidth_hz_{CC1101_DEFAULT_RX_BANDWIDTH_HZ};
   uint32_t deviation_hz_{CC1101_DEFAULT_DEVIATION_HZ};
@@ -447,6 +480,7 @@ class Cc1101Hal : public RadioHal {
   bool foc_cs_gate_{false};
   /// SYNC1:SYNC0, high byte first on air. See set_sync_word().
   uint16_t sync_word_{CC1101_SYNC_WORD_DEFAULT};
+  uint8_t tx_preamble_bytes_{CC1101_TX_PREAMBLE_DEFAULT};
 
   // --- solved register fields and the values they actually produce, so
   //     dump_config() can print what was programmed rather than what was asked for ---

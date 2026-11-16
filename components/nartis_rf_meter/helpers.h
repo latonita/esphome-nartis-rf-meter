@@ -22,6 +22,19 @@ static constexpr uint8_t RF_DEVICE_TYPE_CIU = 0x25; // byte [9] of CIU address
 static constexpr uint8_t RF_DEVICE_TYPE_METER = 0x02; // byte [9] of meter address
 
 /* ================================================================
+ * Nartis channel plan
+ * ================================================================
+ * All CIU -> meter traffic (probe/ACK/beacon/GET) is transmitted on CH0,
+ * 433.82 MHz - the meter's wake frequency. The meter's reply channel is
+ * advertised in frame[12] bits 7:6 and must be one of 1..3; the factory CIU
+ * never advertises 0 (CH0 is the shared wake/probe channel).
+ */
+static constexpr uint8_t CIU_TX_CHANNEL = 0;        // 433.82 MHz, never changes
+static constexpr uint8_t FIRST_REPLY_CHANNEL = 1;   // 433.30 MHz
+static constexpr uint8_t LAST_REPLY_CHANNEL = 3;    // 434.70 MHz
+static constexpr uint8_t DEFAULT_REPLY_CHANNEL = 2; // 434.26 MHz (proven default)
+
+/* ================================================================
  * CI-field markers and AES-GCM security flag
  * ================================================================ */
 static constexpr uint8_t CI_FIELD_NORMAL = 0x7A;   // header[10] for Mode 1/2/3 (TX)

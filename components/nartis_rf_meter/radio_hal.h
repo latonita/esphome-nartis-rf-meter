@@ -36,6 +36,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "helpers.h"
+
 namespace esphome::nartis_rf_meter {
 
 /* ================================================================
@@ -64,12 +66,11 @@ namespace esphome::nartis_rf_meter {
  * low-IF receiver must not apply any offset of its own - it is handed the
  * carrier and should tune to the carrier.
  *
- * Two channel modes, which is what channel_tx_hz()'s `alternative` flag selects:
+ * TX carrier = 433.82 MHz (channel 0) ALWAYS, RX carrier = channel i's carrier
+ * (i = 1..3 reply channels). The `use_alternative_channels` YAML option is kept
+ * for compatibility but no longer changes this:
  *
- *   default mode      TX carrier = channel i's carrier, RX carrier = the same.
- *
- *   alternative mode  TX carrier = 433.82 MHz (channel 0) ALWAYS, RX carrier =
- *                     channel i's carrier. This is the MEASURED meter
+ *   TX/RX split       This is the MEASURED meter
  *                     reply-frequency behaviour, not a guess: the meter wakes on
  *                     433.82 and the CIU keeps transmitting there, while the
  *                     advertised channel index commands the meter to reply on
@@ -101,12 +102,9 @@ static constexpr uint32_t CHANNEL_LOW_IF_HZ = 282608u;
 /// An out-of-range channel falls back to ch0 rather than reading past the table.
 inline uint32_t channel_rx_hz(uint8_t ch) { return CHANNEL_CARRIER_HZ[(ch < NUM_CHANNELS) ? ch : 0]; }
 
-/// Carrier we transmit on for channel `ch`, Hz. In alternative-channel mode that
-/// is always ch0/433.82 - the frequency the meter wakes on - whatever channel is
-/// advertised; in default mode it is the channel's own carrier.
-inline uint32_t channel_tx_hz(uint8_t ch, bool alternative) {
-  return alternative ? CHANNEL_CARRIER_HZ[0] : channel_rx_hz(ch);
-}
+/// Carrier we transmit on, Hz. ALWAYS ch0/433.82 - the frequency the meter wakes
+/// on - whatever reply channel is advertised (measured on a real meter).
+inline uint32_t channel_tx_hz() { return CHANNEL_CARRIER_HZ[CIU_TX_CHANNEL]; }
 
 /* ================================================================
  * Receive status
@@ -234,6 +232,13 @@ class RadioHal {
 
   /// RSSI of the last reception, dBm.
   virtual int8_t get_rssi_dbm() = 0;
+
+  /// Strongest RSSI seen during the current/last receive epoch, dBm, or
+  /// RSSI_UNKNOWN if the backend does not track it. Diagnostic only: on an RX
+  /// timeout it tells "the meter never transmitted" apart from "it transmitted and
+  /// we could not decode it".
+  static constexpr int8_t RSSI_UNKNOWN = INT8_MIN;
+  virtual int8_t rx_peak_rssi_dbm() const { return RSSI_UNKNOWN; }
 
   /// Put the chip into (or take it out of) whatever mode it needs for get_rssi_dbm()
   /// to mean anything. Default: do nothing.

@@ -50,6 +50,8 @@ CONF_PIN_MOSI = "pin_mosi"
 CONF_PIN_CS = "pin_cs"
 CONF_PIN_GDO0 = "pin_gdo0"
 CONF_RX_OFFSET = "rx_offset"
+CONF_FREQ_OFFSET = "freq_offset"
+CONF_TX_PREAMBLE_BYTES = "tx_preamble_bytes"
 CONF_OUTPUT_POWER = "output_power"
 CONF_BANDWIDTH = "bandwidth"
 CONF_DEVIATION = "deviation"
@@ -204,8 +206,8 @@ def validate_deviation(value):
     return hz
 
 
-def validate_rx_offset(value):
-    """Signed RX offset in Hz.
+def _signed_hz(name, value):
+    """Parse a signed frequency in Hz.
 
     `cv.frequency` has no notion of a negative frequency, so the sign is peeled off
     here and reapplied: `-3kHz`, `+0Hz`, `2500` and `0` all work, and a bare number
@@ -218,15 +220,36 @@ def validate_rx_offset(value):
             sign = -1 if text[0] == "-" else 1
             text = text[1:].lstrip()
         try:
-            hz = int(round(sign * cv.frequency(text)))
+            return int(round(sign * cv.frequency(text)))
         except ValueError as err:
             # cv.frequency's regex matches an empty mantissa, e.g. a bare "-".
             raise cv.Invalid(
-                f"rx_offset must be a signed number of Hz, optionally with a unit "
+                f"{name} must be a signed number of Hz, optionally with a unit "
                 f"('-3kHz', '0Hz', '2500'); got '{value}'"
             ) from err
-    else:
-        hz = int(round(cv.float_(value)))
+    return int(round(cv.float_(value)))
+
+
+# Crystal-error correction for both directions. 50 kHz is ~115 ppm at 433.8 MHz -
+# far beyond any working crystal; anything near it is a typo, not a correction.
+FREQ_OFFSET_MAX_HZ = 50000
+
+
+def validate_freq_offset(value):
+    """Signed crystal-error correction in Hz, applied to the TX and RX carriers."""
+    hz = _signed_hz(CONF_FREQ_OFFSET, value)
+    if abs(hz) > FREQ_OFFSET_MAX_HZ:
+        raise cv.Invalid(
+            f"{CONF_FREQ_OFFSET} must be within +-{FREQ_OFFSET_MAX_HZ} Hz; got {hz} Hz. "
+            f"It corrects the module's crystal error (typically a few kHz to ~17 kHz "
+            f"at 433.8 MHz), it is not a channel change."
+        )
+    return hz
+
+
+def validate_rx_offset(value):
+    """Signed RX offset in Hz."""
+    hz = _signed_hz(CONF_RX_OFFSET, value)
     if abs(hz) > RX_OFFSET_MAX_HZ:
         raise cv.Invalid(
             f"rx_offset is a signed number of Hz and must be within "
@@ -307,6 +330,13 @@ CC1101_SCHEMA = cv.Schema(
         # unlike the CMT2300A's pin_gpio3, which is mandatory.
         cv.Optional(CONF_PIN_GDO0): pins.internal_gpio_input_pin_schema,
         cv.Optional(CONF_RX_OFFSET, default=0): validate_rx_offset,
+        # Crystal-error correction, applied to BOTH TX and RX. RF433-1's +-6 kHz
+        # deviation is smaller than a cheap module's crystal error can be, and an
+        # uncorrected TX lands outside what the meter's receiver decodes.
+        cv.Optional(CONF_FREQ_OFFSET, default=0): validate_freq_offset,
+        # 0x55 preamble bytes sent ahead of the sync word on TX (software preamble;
+        # the CC1101's own preamble/sync are off during TX).
+        cv.Optional(CONF_TX_PREAMBLE_BYTES, default=12): cv.int_range(min=4, max=64),
         cv.Optional(CONF_OUTPUT_POWER, default=10): validate_output_power,
         cv.Optional(CONF_BANDWIDTH, default="101562Hz"): validate_rx_bandwidth,
         cv.Optional(CONF_DEVIATION, default="6kHz"): validate_deviation,
@@ -456,7 +486,7 @@ CONFIG_SCHEMA = cv.All(
 
             cv.Required(CONF_METER_SERIAL): validate_meter_serial,
 
-            cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=0, max=3),
+            cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=1, max=3),
 
             # Use the alternative channel mode: transmit always on 433.82 MHz - the
             # frequency the meter wakes on - while the advertised channel index
@@ -533,6 +563,8 @@ async def radio_to_code(radio_config):
             pin_exprs.append(cg.nullptr)
         cg.add(hal.set_pins(*pin_exprs))
         cg.add(hal.set_rx_offset_hz(radio_config[CONF_RX_OFFSET]))
+        cg.add(hal.set_freq_offset_hz(radio_config[CONF_FREQ_OFFSET]))
+        cg.add(hal.set_tx_preamble_bytes(radio_config[CONF_TX_PREAMBLE_BYTES]))
         cg.add(hal.set_output_power_dbm(radio_config[CONF_OUTPUT_POWER]))
         cg.add(hal.set_rx_bandwidth_hz(radio_config[CONF_BANDWIDTH]))
         cg.add(hal.set_deviation_hz(radio_config[CONF_DEVIATION]))

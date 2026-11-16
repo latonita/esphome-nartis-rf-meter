@@ -422,10 +422,16 @@ void RfDataLayer::set_aes_key(const uint8_t key[AES_KEY_SIZE]) {
  *    -6 dBm -> quality 62 (saturated) -> channel 1 gives 0x7E
  * ================================================================ */
 uint8_t RfDataLayer::compose_channel_byte(uint8_t channel_idx, int8_t rssi_dbm) {
+  // Reply channels are 1..3; CH0 is the wake/TX channel and must never be
+  // advertised as a reply channel (defensive clamp for any caller).
+  const uint8_t ch = (channel_idx >= FIRST_REPLY_CHANNEL &&
+                      channel_idx <= LAST_REPLY_CHANNEL)
+                         ? channel_idx
+                         : DEFAULT_REPLY_CHANNEL;
   int q = (static_cast<int>(rssi_dbm) + 130) / 2;
   if (q < 1) q = 1;
   if (q > 62) q = 62;
-  return static_cast<uint8_t>(((channel_idx & 0x3) << 6) | (q & 0x3F));
+  return static_cast<uint8_t>(((ch & 0x3) << 6) | (q & 0x3F));
 }
 
 size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,

@@ -344,6 +344,22 @@ static constexpr uint8_t CC1101_MDMCFG2_MOD_2FSK = 0x00;  // MOD_FORMAT = 000
 static constexpr uint8_t CC1101_MDMCFG2_MOD_GFSK = 0x10;  // MOD_FORMAT = 001, Gaussian BT = 0.5
 static constexpr uint8_t CC1101_MDMCFG2_SYNC_16_16 = 0x02;  // SYNC_MODE = 010, exact 16-bit match
 
+/* TX framing. For transmit the packet engine's preamble and sync are OFF
+ * (MDMCFG2.SYNC_MODE = 000: pure FIFO data on the air) and the FIFO holds
+ *   [0x55 x tx_preamble_bytes][sync word F6 72][frame]
+ * so the preamble runs contiguously into the sync word like the CIU's. begin_rx()
+ * writes MDMCFG2 back with SYNC_MODE = 010 for the F6 72 correlator. */
+static constexpr uint8_t CC1101_MDMCFG2_SYNC_MODE_MASK = 0x07;
+static constexpr uint8_t CC1101_TX_PREAMBLE_FILL = 0x55;
+static constexpr size_t CC1101_TX_SYNC_LEN = 2;  // sync word bytes after the preamble
+static constexpr uint8_t CC1101_TX_PREAMBLE_DEFAULT = 12;
+static constexpr uint8_t CC1101_TX_PREAMBLE_MIN = 4;
+static constexpr uint8_t CC1101_TX_PREAMBLE_MAX = 64;
+
+/* RX recovery (drain_rx): a sync that never yields a complete frame is abandoned. */
+static constexpr uint32_t CC1101_RX_BYTE_GAP_MS = 100;     // no bytes for this long mid-frame
+static constexpr uint32_t CC1101_RX_FRAME_MARGIN_MS = 50;  // slack on top of the frame airtime
+
 /* MDMCFG3: data rate mantissa. R = (256 + DRATE_M) * 2^DRATE_E * Fxosc / 2^28.
  * Target 2400 baud needs (256 + M) * 2^E = 2400 * 2^28 / 26e6 = 24778.7, which only
  * E = 6 can express with M in [0, 255]: M = 24778.7/64 - 256 = 131.2 -> 131.

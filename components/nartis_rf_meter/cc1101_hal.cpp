@@ -234,7 +234,17 @@ void Cc1101Hal::set_rx_frequency(uint32_t freq_hz) { this->rx_freq_hz_ = freq_hz
 // the clamp below cannot fire in practice; it is here so that no arrangement of
 // setter calls can hand program_frequency_() a wrapped-around unsigned value.
 uint32_t Cc1101Hal::rx_tuned_hz_() const {
-  const int64_t hz = (int64_t) this->rx_freq_hz_ + (int64_t) this->rx_offset_hz_;
+  const int64_t hz = (int64_t) this->rx_freq_hz_ + (int64_t) this->rx_offset_hz_ + (int64_t) this->freq_offset_hz_;
+  if (hz <= 0) {
+    return 1u;
+  }
+  return (uint32_t) hz;
+}
+
+// The TX carrier actually tuned. freq_offset_hz_ is a crystal-error correction and
+// so applies to both directions; rx_offset_hz_ is RX-only.
+uint32_t Cc1101Hal::tx_tuned_hz_() const {
+  const int64_t hz = (int64_t) this->freq_hz_ + (int64_t) this->freq_offset_hz_;
   if (hz <= 0) {
     return 1u;
   }
@@ -360,6 +370,7 @@ void Cc1101Hal::solve_params_() {
     ESP_LOGW(TAG, "output power %d dBm is not a 433 MHz PATABLE entry - using the nearest, %d dBm",
              this->output_power_dbm_, this->output_power_actual_dbm_);
   }
+  this->params_solved_ = true;
 }
 
 void Cc1101Hal::write_config_() {
@@ -391,7 +402,7 @@ void Cc1101Hal::write_config_() {
   this->write_reg_(CC1101_REG_TEST2, this->test2_);
   this->write_reg_(CC1101_REG_TEST1, this->test1_);
   this->write_reg_(CC1101_REG_FOCCFG, this->foccfg_value_());
-  this->program_frequency_(this->freq_hz_);
+  this->program_frequency_(this->tx_tuned_hz_());
 
   // FREND0.PA_POWER is 0, so the PA only ever reads PATABLE[0]; the remaining
   // entries are zeroed so that a stray index could only mean "off", never
@@ -447,6 +458,7 @@ bool Cc1101Hal::init() {
     return false;
   }
   pin_high(this->cs_);
+  esphome::delayMicroseconds(20);  // settle after SRES before the next CS low
   esphome::delay(1);
 
   // From here on everything goes through select_(), which raises spi_not_ready_ if
@@ -518,45 +530,51 @@ bool Cc1101Hal::init() {
   return true;
 }
 
-// How long a frame may take to get out, which is the only honest deadline for
-// transmit(). The packet engine puts 12 preamble bytes and 2 sync bytes on the air
-// ahead of the FIFO data, and every bit of all of it is clocked at the programmed
-// 2398.968 baud:
-//
-//   airtime_ms = (12 + 2 + fifo_bytes) * 8 bits / 2398.968 baud * 1000
-//
-// `fifo_bytes` is the frame and nothing else: preamble and the whole sync word come
-// from the packet engine, so they are the +12 and +2 above and never pass through the
-// FIFO. For the 512-byte worst case that is 526 * 8 / 2398.968 = 1754 ms, which is why
-// a fixed deadline could not work: it would either be absurd for a 40-byte beacon or
-// guaranteed to abort a long frame that was going out perfectly well. The arithmetic
-// is integer milli-baud and rounds up, so the computed figure never lands under the
-// true airtime.
+// How long a frame may take to get out, the only honest deadline for transmit().
+// Preamble and sync travel through the FIFO, so airtime is simply
+//   airtime_ms = fifo_bytes * 8 bits / 2398.968 baud * 1000
+// Integer milli-baud, rounded up, so the figure never lands under the true airtime.
 uint32_t Cc1101Hal::tx_done_timeout_ms_(size_t fifo_bytes) {
-  const uint64_t bits = (uint64_t) (CC1101_PREAMBLE_BYTES + CC1101_SYNC_BYTES + fifo_bytes) * 8u;
+  const uint64_t bits = (uint64_t) fifo_bytes * 8u;
   const uint32_t airtime_ms =
       (uint32_t) ((bits * 1000000u + CC1101_DRATE_MILLIBAUD - 1u) / CC1101_DRATE_MILLIBAUD);
   return airtime_ms + TX_DONE_MARGIN_MS;
 }
 
-// Write `count` bytes of `frame`, starting at `offset`, into the TX FIFO.
-//
-// Nothing is prepended and nothing is staged: the whole on-air header - preamble and
-// all four sync bytes - comes from the packet engine, so the FIFO carries the caller's
-// frame and only the caller's frame. Writing it straight through from an offset is
-// what lets a 512-byte frame be transmitted with no staging buffer at all, and is
-// possible here only because RF433-1 is MSB-first and needs no per-byte transformation
-// on the way out.
-//
-// The bounds clamp is defensive rather than load-bearing - transmit() never asks for a
-// slice past the end - but it is the one thing that would read off the caller's buffer
-// if the refill arithmetic were ever changed, so it stays.
+// Write `count` bytes of the TX stream, starting at `offset`, into the TX FIFO.
+// The stream is [0x55 x tx_preamble_bytes_][sync_word_ hi, lo][frame]; offset/count are
+// in stream coordinates. The radio's own preamble/sync are off during TX (see
+// transmit()), so this is every bit on the air. Callers never ask for more than the
+// FIFO depth at once. The frame is written straight through, with no staging buffer.
 void Cc1101Hal::write_tx_chunk_(const uint8_t *frame, size_t frame_len, size_t offset, size_t count) {
-  if (frame == nullptr || count == 0 || offset >= frame_len) {
+  const size_t npre = this->tx_preamble_bytes_;
+  const size_t prefix_len = npre + CC1101_TX_SYNC_LEN;
+  const size_t stream_len = frame_len + prefix_len;
+  if (frame == nullptr || count == 0 || offset >= stream_len) {
     return;
   }
-  const size_t left = frame_len - offset;
-  this->write_burst_(CC1101_REG_FIFO, frame + offset, (count < left) ? count : left);
+  if (count > stream_len - offset) {
+    count = stream_len - offset;
+  }
+  if (offset < prefix_len) {
+    uint8_t tmp[CC1101_FIFO_SIZE];
+    size_t n = (prefix_len - offset < count) ? (prefix_len - offset) : count;
+    if (n > sizeof(tmp)) {
+      n = sizeof(tmp);
+    }
+    for (size_t i = 0; i < n; i++) {
+      const size_t idx = offset + i;
+      tmp[i] = (idx < npre)    ? CC1101_TX_PREAMBLE_FILL
+               : (idx == npre) ? (uint8_t) (this->sync_word_ >> 8)
+                               : (uint8_t) (this->sync_word_ & 0xFFu);
+    }
+    this->write_burst_(CC1101_REG_FIFO, tmp, n);
+    offset += n;
+    count -= n;
+  }
+  if (count > 0) {
+    this->write_burst_(CC1101_REG_FIFO, frame + (offset - prefix_len), count);
+  }
 }
 
 // ================= TX =================
@@ -594,12 +612,15 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
   // promises ("LEN TYPE ... CRCL CRCH on transmit"). There is nothing to strip, and
   // adding a strip "for symmetry" would eat the first two bytes of every frame.
   //
-  // Nothing is PREPENDED either. The on-air sync word is 55 55 F6 72, whose leading
-  // 55 55 is byte-identical to the preamble and merges with it, so SYNC1/SYNC0 = F6 72
-  // and NUM_PREAMBLE = 12 put the complete header on the air from the packet engine.
-  // `len` bytes go into the FIFO and `len` bytes come out of the PA. (A previous
-  // revision prepended 55 55 here, on the reversed reading of the sync word that
-  // fw/RF_PHY_SPEC.md sec. 4.4 prints; see the sync-word note in cc1101_defs.h.)
+  // What IS prepended is the whole on-air header: tx_preamble_bytes_ x 0x55, then the
+  // sync word, then the frame. The CC1101's hardware preamble does not run contiguously
+  // into a FIFO 0x55, while the CIU sends one unbroken 0x55 run into F6 72, so for TX the
+  // packet engine's preamble and sync are off (MDMCFG2.SYNC_MODE = 000) and the header is
+  // built here. begin_rx() restores SYNC_MODE = 010. Everything below that counts FIFO
+  // bytes - PKTLEN, chunking, `written`, the done timeout - uses `total`, not `len`.
+
+  // FIFO bytes for this packet: software preamble + sync word + the frame.
+  const size_t total = len + (size_t) this->tx_preamble_bytes_ + CC1101_TX_SYNC_LEN;
 
   if (!this->go_idle_()) {
     ESP_LOGW(TAG, "TX: chip would not go IDLE (MARCSTATE=0x%02X)", this->marcstate_());
@@ -612,41 +633,47 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
   // cannot name every packet this component builds. The standard CC1101 answer is
   // TI's DN500 "infinite-to-fixed" technique, also pointed at by RF_PHY_SPEC.md sec. 7:
   //
-  //   1. PKTLEN = len mod 256, and start the packet in INFINITE length mode.
+  //   1. PKTLEN = total mod 256, and start the packet in INFINITE length mode.
   //   2. Stream bytes. In infinite mode the packet engine never ends the packet, but
   //      its internal length counter runs all the same, modulo 256.
   //   3. Once fewer than 256 bytes remain to be transmitted, switch LENGTH_CONFIG to
   //      FIXED. The counter keeps its value, and the engine now ends the packet when
-  //      it reaches PKTLEN - which, because PKTLEN is len mod 256 and we switched
-  //      during the final sub-256 stretch, happens after exactly len bytes.
+  //      it reaches PKTLEN - which, because PKTLEN is total mod 256 and we switched
+  //      during the final sub-256 stretch, happens after exactly total bytes.
   //
   // The switch is made here when every byte is in the FIFO, which bounds the bytes
   // still to be transmitted by the 64-byte FIFO depth - comfortably inside the 256
   // the technique requires, and the simplest condition that is always both legal and
-  // timely. len mod 256 == 0 (len = 256 or 512) is a legitimate PKTLEN of 0 under this
+  // timely. total mod 256 == 0 (total = 256 or 512) is a legitimate PKTLEN of 0 under this
   // scheme, not a zero-length packet: the counter wraps to 0 after the right number
   // of bytes. GDO0 keeps working across the switch, because a packet in infinite mode
   // has no end for GDO0 to fall at until the mode changes.
   //
   // For anything PKTLEN can name on its own, plain fixed-length mode is used from the
   // start - fewer moving parts on the path that carries almost every frame.
-  const bool long_packet = (len > TX_PLAIN_FIXED_MAX);
+  const bool long_packet = (total > TX_PLAIN_FIXED_MAX);
   bool length_fixed = !long_packet;
   if (long_packet) {
-    this->write_reg_(CC1101_REG_PKTLEN, (uint8_t) (len & 0xFFu));
+    this->write_reg_(CC1101_REG_PKTLEN, (uint8_t) (total & 0xFFu));
     this->write_reg_(CC1101_REG_PKTCTRL0, CC1101_PKTCTRL0_LENGTH_INFINITE);
   } else {
     this->write_reg_(CC1101_REG_PKTCTRL0, CC1101_PKTCTRL0_TX);
-    this->write_reg_(CC1101_REG_PKTLEN, (uint8_t) len);
+    this->write_reg_(CC1101_REG_PKTLEN, (uint8_t) total);
   }
 
-  this->program_frequency_(this->freq_hz_);  // TX sits on the channel's TX carrier, no offset
+  // No hardware preamble/sync for TX: SYNC_MODE = 000, modulation bits unchanged. GDO0
+  // (IOCFG0 = 0x06, "sync sent") therefore never fires; completion comes from MARCSTATE
+  // returning to IDLE, which the loop below already handles.
+  this->write_reg_(CC1101_REG_MDMCFG2,
+                   (uint8_t) (this->mdmcfg2_value_() & (uint8_t) ~CC1101_MDMCFG2_SYNC_MODE_MASK));
+
+  this->program_frequency_(this->tx_tuned_hz_());  // channel's TX carrier + crystal correction
   this->strobe_(CC1101_STROBE_SFTX);
 
   // An RF433-1 frame runs well past the 64-byte FIFO, so the FIFO is primed with what
   // fits and refilled as it drains - writing the whole frame up front would simply
   // drop the tail, exactly as it would on the CMT2300A.
-  size_t written = (len > CC1101_FIFO_SIZE) ? CC1101_FIFO_SIZE : len;
+  size_t written = (total > CC1101_FIFO_SIZE) ? CC1101_FIFO_SIZE : total;
   this->write_tx_chunk_(frame, len, 0, written);
 
   this->strobe_(CC1101_STROBE_STX);
@@ -683,11 +710,11 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
              TX_ENTER_TIMEOUT_MS, marc);
   }
 
-  const bool chunked = len > CC1101_FIFO_SIZE;
+  const bool chunked = total > CC1101_FIFO_SIZE;
   // Derived from this frame's own airtime rather than a one-size constant - see
   // tx_done_timeout_ms_(), which adds the preamble and sync bytes the packet engine
   // contributes on top of the FIFO byte count.
-  const uint32_t done_timeout_ms = tx_done_timeout_ms_(len);
+  const uint32_t done_timeout_ms = tx_done_timeout_ms_(total);
   const uint32_t t0 = esphome::millis();
   bool sync_seen = false;
   bool done = false;
@@ -696,7 +723,7 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
     if ((txbytes & CC1101_TXBYTES_UNDERFLOW) != 0) {
       // The PA ran out of bytes mid-packet: whatever reached the air is truncated
       // and the chip is wedged in TXFIFO_UNDERFLOW until the FIFO is flushed.
-      ESP_LOGW(TAG, "TX FIFO underflow after %zu/%zu bytes - frame truncated on air", written, len);
+      ESP_LOGW(TAG, "TX FIFO underflow after %zu/%zu bytes - frame truncated on air", written, total);
       this->strobe_(CC1101_STROBE_SIDLE);
       this->strobe_(CC1101_STROBE_SFTX);
       this->go_idle_();
@@ -704,12 +731,12 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
     }
 
     const uint8_t in_fifo = txbytes & CC1101_FIFO_COUNT_MASK;
-    if (written < len && in_fifo <= TX_REFILL_LOW_WATER) {
+    if (written < total && in_fifo <= TX_REFILL_LOW_WATER) {
       // Refill to the brim once the FIFO has drained past the threshold programmed
       // in FIFOTHR (33 bytes in TX). At 2400 baud a full FIFO is 213 ms of air, so
       // the loop has an enormous margin over the poll interval.
       const size_t room = CC1101_FIFO_SIZE - in_fifo;
-      const size_t remaining = len - written;
+      const size_t remaining = total - written;
       const size_t chunk = (remaining > room) ? room : remaining;
       this->write_tx_chunk_(frame, len, written, chunk);
       written += chunk;
@@ -717,12 +744,12 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
 
     // The infinite-to-fixed switch, step 3 above. Everything is in the FIFO, so at
     // most CC1101_FIFO_SIZE bytes remain to be transmitted - well inside the 256 the
-    // technique needs - and PKTLEN (= len mod 256) now names where the packet ends.
-    if (!length_fixed && written >= len) {
+    // technique needs - and PKTLEN (= total mod 256) now names where the packet ends.
+    if (!length_fixed && written >= total) {
       this->write_reg_(CC1101_REG_PKTCTRL0, CC1101_PKTCTRL0_LENGTH_FIXED);
       length_fixed = true;
       ESP_LOGVV(TAG, "TX: switched to fixed length with %u byte(s) left in the FIFO (PKTLEN=%u)",
-                (unsigned) in_fifo, (unsigned) (len & 0xFFu));
+                (unsigned) in_fifo, (unsigned) (total & 0xFFu));
     }
 
     if (this->gdo0_pin_ != nullptr) {
@@ -750,7 +777,7 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
     // "everything written and back in IDLE" is an unambiguous completion - but only
     // once TX is known to have started, because an unstarted TX sits in IDLE too and
     // would otherwise satisfy this on the very first poll.
-    if (tx_started && written >= len && marc == CC1101_MARC_IDLE) {
+    if (tx_started && written >= total && marc == CC1101_MARC_IDLE) {
       done = true;
       break;
     }
@@ -776,18 +803,18 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
   }
   if (!done) {
     ESP_LOGW(TAG, "TX done timeout after %" PRIu32 " ms (%zu/%zu written, MARCSTATE=0x%02X TXBYTES=0x%02X)",
-             dur, written, len, this->marcstate_(), this->read_status_reg_(CC1101_REG_TXBYTES));
+             dur, written, total, this->marcstate_(), this->read_status_reg_(CC1101_REG_TXBYTES));
     this->go_idle_();
     return false;
   }
-  if (written < len) {
+  if (written < total) {
     // The packet ended with bytes still unsent, so what reached the air is a frame
     // whose CRC cannot check out and which the meter will never answer. That is a
     // failed transmission, not a qualified success: say so, and let the component
     // resend rather than spend an RX timeout waiting on it. (The CMT2300A backend
     // reports the same condition the same way - the two must not disagree about
     // what "transmit() returned true" means.)
-    ESP_LOGW(TAG, "TX complete but only %zu/%zu written - frame truncated on air", written, len);
+    ESP_LOGW(TAG, "TX complete but only %zu/%zu written - frame truncated on air", written, total);
     this->go_idle_();
     return false;
   }
@@ -808,9 +835,9 @@ bool Cc1101Hal::transmit(const uint8_t *frame, size_t len) {
     return false;
   }
   // For a chunked (> FIFO) frame, log timing and fill so a clean send (dur ~ airtime,
-  // written == len) can be told apart from a FIFO underrun (dur far too short).
+  // written == total) can be told apart from a FIFO underrun (dur far too short).
   if (chunked) {
-    ESP_LOGVV(TAG, "TX done (chunked): %zu/%zu written, %" PRIu32 " ms", written, len, dur);
+    ESP_LOGVV(TAG, "TX done (chunked): %zu/%zu written, %" PRIu32 " ms", written, total, dur);
   }
   this->go_idle_();
   return true;
@@ -859,6 +886,10 @@ bool Cc1101Hal::begin_rx() {
   this->write_reg_(CC1101_REG_PKTCTRL0, CC1101_PKTCTRL0_RX);
   this->write_reg_(CC1101_REG_PKTLEN, 0xFF);
 
+  // transmit() leaves MDMCFG2.SYNC_MODE at 000; restore the RX value (SYNC_MODE = 010,
+  // 16-of-16 on F6 72) on every epoch.
+  this->write_reg_(CC1101_REG_MDMCFG2, this->mdmcfg2_value_());
+
   // Nothing has to be armed for the sync word here. The correlator matches F6 72,
   // the 55 55 ahead of it is preamble as far as the chip is concerned, and the first
   // byte the FIFO delivers after sync detection is already the frame's LEN. See the
@@ -878,6 +909,12 @@ bool Cc1101Hal::begin_rx() {
     ESP_LOGW(TAG, "RX: CC1101 stopped asserting CHIP_RDYn while entering RX - the state is unknown");
     return false;
   }
+  this->rx_peak_rssi_dbm_ = RSSI_UNKNOWN;
+  this->rx_freqest_logged_ = false;
+  this->rx_taken_ = 0;
+  this->rx_expected_total_ = 0;
+  this->rx_first_ms_ = 0;
+  this->rx_last_ms_ = 0;
   this->rx_epoch_armed_ = true;
   return true;
 }
@@ -984,6 +1021,47 @@ size_t Cc1101Hal::drain_rx(uint8_t *buf, size_t buf_size, RxStatus &status) {
     status = RxStatus::RX_STATUS_IO_ERROR;
     return 0;
   }
+
+  // Diagnostic: track the strongest signal seen this epoch. RSSI is free-running in
+  // RX, so a meter reply that never matched the sync word still shows up here as a
+  // peak well above the noise floor. A sample taken while CHIP_RDYn was low is not a
+  // measurement and is simply not counted.
+  if (marc == CC1101_MARC_RX) {
+    const int8_t rssi = this->read_rssi_dbm_();
+    if (!this->spi_error_() && (this->rx_peak_rssi_dbm_ == RSSI_UNKNOWN || rssi > this->rx_peak_rssi_dbm_)) {
+      this->rx_peak_rssi_dbm_ = rssi;
+    }
+    this->clear_spi_error_();
+  }
+  // Stalled-sync recovery. Infinite-length RX never ends a packet by itself, so a false
+  // sync (noise, a foreign frame) or a cut-short frame leaves the caller holding a
+  // fragment whose LEN may promise far more than will arrive. Once bytes were handed
+  // over, abandon the frame if it overruns its airtime ((LEN + 3) bytes + margin) or if
+  // the stream goes quiet mid-frame: SIDLE, SFRX, SRX, and report OVERFLOW (the
+  // existing "frame lost, backend recovered" status) so the caller drops the fragment.
+  // The one byte the errata hold-back leaves in the FIFO is not a stall.
+  if (this->rx_taken_ > 0 && marc == CC1101_MARC_RX &&
+      (this->rx_expected_total_ == 0 || this->rx_taken_ + 1 < this->rx_expected_total_)) {
+    const uint32_t now = esphome::millis();
+    bool stalled = (available == 0) && (now - this->rx_last_ms_ > CC1101_RX_BYTE_GAP_MS);
+    if (this->rx_expected_total_ != 0) {
+      const uint32_t frame_ms =
+          (uint32_t) (((uint64_t) (this->rx_expected_total_ + 2u) * 8u * 1000000u) / CC1101_DRATE_MILLIBAUD) +
+          CC1101_RX_FRAME_MARGIN_MS;
+      stalled = stalled || (now - this->rx_first_ms_ > frame_ms);
+    }
+    if (stalled) {
+      ESP_LOGW(TAG, "RX: frame stalled after %zu/%zu byte(s) - re-arming RX", this->rx_taken_,
+               this->rx_expected_total_);
+      this->strobe_(CC1101_STROBE_SIDLE);
+      this->strobe_(CC1101_STROBE_SFRX);
+      this->strobe_(CC1101_STROBE_SRX);
+      this->rx_taken_ = 0;
+      this->rx_expected_total_ = 0;
+      status = RxStatus::RX_STATUS_OVERFLOW;
+      return 0;
+    }
+  }
   if (available == 0) {
     if (marcstate_is_dead_rx(marc)) {
       ESP_LOGW(TAG, "RX: chip left RX with an empty FIFO (MARCSTATE=0x%02X)", marc);
@@ -1029,11 +1107,38 @@ size_t Cc1101Hal::drain_rx(uint8_t *buf, size_t buf_size, RxStatus &status) {
     return 0;
   }
 
+  {
+    const uint32_t now = esphome::millis();
+    if (this->rx_taken_ == 0) {
+      this->rx_first_ms_ = now;
+      this->rx_expected_total_ = (size_t) buf[0] + 1u;  // buf[0] is the frame's LEN
+    }
+    this->rx_taken_ += take;
+    this->rx_last_ms_ = now;
+  }
+
   // NO BIT REVERSAL. The sibling RF433-2 backends reverse8() every byte here because
   // that PHY is LSB-first on air; RF433-1 is MSB-first, which is the order the CC1101
   // already shifts in, so the bytes are handed on exactly as received. Nothing is
   // stripped off the front either - the sync word is consumed by the correlator and
   // never reaches the FIFO, so the first byte of this epoch is the frame's own LEN.
+
+  // FREQEST holds the frequency offset FOC measured on this reception, signed, in
+  // Fxosc / 2^14 = ~1587 Hz steps. It is the cheapest crystal-error measurement there
+  // is: if the meter is heard at all, FREQEST is (received carrier - our tuning), and
+  // freq_offset is ADDED to both TX and RX tuning, so the `freq_offset` that puts our
+  // transmitter where the meter expects it is the current freq_offset PLUS the
+  // FREQEST in Hz (not its negation). Logged once per receive epoch, i.e. once per
+  // received frame; the HAL cannot tell CRC-OK from CRC-bad, so it is not gated on it.
+  if (!this->rx_freqest_logged_) {
+    this->rx_freqest_logged_ = true;
+    const int8_t est = (int8_t) this->read_status_reg_(CC1101_REG_FREQEST);
+    const int32_t est_hz = (int32_t) (((int64_t) est * (int64_t) CC1101_XTAL_HZ) / 16384);
+    ESP_LOGD(TAG, "RX: FREQEST %d (%+" PRId32 " Hz) = received carrier - our tuning; freq_offset now %+" PRId32
+                  " Hz, suggest freq_offset %+" PRId32 " Hz", (int) est, est_hz, this->freq_offset_hz_,
+             this->freq_offset_hz_ + est_hz);
+    this->clear_spi_error_();
+  }
 
   // Bytes in hand are reported as DATA even if the chip has since left RX: they were
   // received, and the next poll is where the dead epoch gets noticed.
@@ -1089,10 +1194,14 @@ size_t Cc1101Hal::read_rx_exact(uint8_t *buf, size_t len) {
 // left at the RadioHal no-op default - the CMT2300A needs a mode switch here because
 // it multiplexes RSSI reporting and FIFO merging through one register field, and this
 // part does not.
+int8_t Cc1101Hal::read_rssi_dbm_() {
+  const int rssi_dec = (int) this->read_status_reg_(CC1101_REG_RSSI);
+  return (int8_t) ((rssi_dec >= 128) ? (((rssi_dec - 256) / 2) - 74) : ((rssi_dec / 2) - 74));
+}
+
 int8_t Cc1101Hal::get_rssi_dbm() {
   this->clear_spi_error_();
-  const int rssi_dec = (int) this->read_status_reg_(CC1101_REG_RSSI);
-  const int dbm = (rssi_dec >= 128) ? (((rssi_dec - 256) / 2) - 74) : ((rssi_dec / 2) - 74);
+  const int dbm = this->read_rssi_dbm_();
   if (this->spi_error_()) {
     // The byte came off a chip that had not asserted CHIP_RDYn, so it is not an RSSI
     // reading. It is still returned, because RadioHal::get_rssi_dbm() has no way to
@@ -1121,7 +1230,14 @@ void Cc1101Hal::dump_config() {
     ESP_LOGCONFIG(TAG, "  GDO0 pin: not used (TX completion polled from MARCSTATE)");
   }
 
-  const uint32_t tx_word = freq_word_for_(this->freq_hz_);
+  // ESPHome calls dump_config() before the component's deferred init has run, so
+  // the solved deviation/bandwidth/PA values would otherwise print as zeros. Solving
+  // is pure arithmetic and touches no hardware, so do it here on demand.
+  if (!this->params_solved_) {
+    this->solve_params_();
+  }
+
+  const uint32_t tx_word = freq_word_for_(this->tx_tuned_hz_());
   const uint32_t tx_hz = freq_hz_for_word_(tx_word);
   const uint32_t rx_requested = this->rx_tuned_hz_();
   const uint32_t rx_word = freq_word_for_(rx_requested);
@@ -1137,6 +1253,8 @@ void Cc1101Hal::dump_config() {
                 this->freq_hz_ / 1e6f);
   ESP_LOGCONFIG(TAG, "  RX carrier: %.4f MHz (FREQ=0x%06" PRIX32 ", %.3f MHz channel %+" PRId32 " Hz offset)",
                 rx_hz / 1e6f, rx_word, this->rx_freq_hz_ / 1e6f, this->rx_offset_hz_);
+  ESP_LOGCONFIG(TAG, "  Crystal correction (freq_offset): %+" PRId32 " Hz, applied to TX and RX",
+                this->freq_offset_hz_);
   ESP_LOGCONFIG(TAG, "  Deviation: %.2f kHz (DEVIATN=0x%02X, DEV_E=%u DEV_M=%u)",
                 this->deviation_actual_hz_ / 1000.0f, (unsigned) ((this->dev_e_ << 4) | this->dev_m_),
                 (unsigned) this->dev_e_, (unsigned) this->dev_m_);

@@ -232,9 +232,8 @@ void NartisRfMeterComponent::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Channel: RSSI auto-scan");
   }
-  ESP_LOGCONFIG(TAG, "  Channel mode: %s (TX %.3f MHz / RX follows the advertised channel)",
-                use_alternative_channels_ ? "alternative" : "default",
-                channel_tx_hz(active_channel_, use_alternative_channels_) / 1e6f);
+  ESP_LOGCONFIG(TAG, "  TX channel: fixed CH0 (%.3f MHz), RX follows the advertised reply channel 1..3",
+                channel_tx_hz() / 1e6f);
   ESP_LOGCONFIG(TAG, "  Sensors: %d registered", (int) sensors_.size());
 
   for (size_t i = 0; i < sensors_.size(); i++) {
@@ -881,25 +880,25 @@ void NartisRfMeterComponent::handle_channel_select_() {
   // fallback moves advertised+RX together (hop_channel_).
   channel_locked_ = false;
   channel_hop_count_ = 0;
-  if (fix_channel_ >= 0) {
+  if (fix_channel_ >= FIRST_REPLY_CHANNEL && fix_channel_ <= LAST_REPLY_CHANNEL) {
     active_channel_ = static_cast<uint8_t>(fix_channel_);
-  } else if (active_channel_ >= NUM_CHANNELS) {
-    active_channel_ = 2;  // default: ch2 = 434.26 MHz (most reliable reply freq)
+  } else if (active_channel_ < FIRST_REPLY_CHANNEL || active_channel_ > LAST_REPLY_CHANNEL) {
+    active_channel_ = DEFAULT_REPLY_CHANNEL;  // ch2 = 434.26 MHz (most reliable reply freq)
   }
   const uint8_t ch = active_channel_;
 
   // Advertise the channel we listen on, so the meter replies on our RX freq.
   rf_.set_channel_quality(ch, rssi_readings_[ch]);
 
-  // Program both carriers. In alternative mode channel_tx_hz() returns
-  // ch0/433.82 whatever `ch` is, so TX stays on the probe frequency while RX
-  // moves to the channel's reply carrier; in default mode both follow `ch`.
-  radio_->set_frequency(channel_tx_hz(ch, use_alternative_channels_));
+  // Program both carriers. channel_tx_hz() is always ch0/433.82 whatever `ch`
+  // is, so TX stays on the probe frequency while RX moves to the channel's
+  // reply carrier.
+  radio_->set_frequency(channel_tx_hz());
   radio_->set_rx_frequency(channel_rx_hz(ch));
 
   ESP_LOGI(TAG, "Channel: TX %.3f MHz, advertise+RX ch%u (%.3f MHz)%s",
-           channel_tx_hz(ch, use_alternative_channels_) / 1e6f, ch, active_rx_freq_mhz_(),
-           (fix_channel_ >= 0) ? " (fix_channel)" : " (default ch2, hop fallback)");
+           channel_tx_hz() / 1e6f, ch, active_rx_freq_mhz_(),
+           (fix_channel_ >= 0) ? " (fix_channel)" : " (default ch2, hop fallback 1..3)");
 
   // First contact requires the pairing handshake; once paired this boot we
   // go straight to the beacon/poll cycle.
@@ -915,13 +914,15 @@ bool NartisRfMeterComponent::hop_channel_() {
   if (!channel_hopping_enabled_() || channel_locked_) {
     return false;
   }
-  active_channel_ = static_cast<uint8_t>((active_channel_ + 1) % NUM_CHANNELS);
+  // Reply channels are 1..3 only: 2 -> 3 -> 1 -> 2 ... CH0 is never advertised.
+  active_channel_ = (active_channel_ >= LAST_REPLY_CHANNEL)
+                        ? FIRST_REPLY_CHANNEL
+                        : static_cast<uint8_t>(active_channel_ + 1);
   // Move advertised channel AND RX together: advertising channel N makes the
   // meter reply on channel N's carrier, which is where set_rx_frequency() tunes
-  // us. TX is reprogrammed too so the two modes stay consistent - in
-  // alternative mode that is a no-op write of ch0/433.82, in default mode TX
-  // follows the hop as it always did.
-  radio_->set_frequency(channel_tx_hz(active_channel_, use_alternative_channels_));
+  // us. TX is reprogrammed too (a no-op write of ch0/433.82) so a backend that
+  // retunes on set_rx_frequency() cannot leave TX off the wake channel.
+  radio_->set_frequency(channel_tx_hz());
   radio_->set_rx_frequency(channel_rx_hz(active_channel_));
   rf_.set_channel_quality(active_channel_, rssi_readings_[active_channel_]);
   channel_hop_count_++;
@@ -1864,6 +1865,13 @@ NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
     } else {
       ESP_LOGW(TAG, "RX timeout (0/%d bytes received in %dms)",
                (int) rx_expected_len_, (int) elapsed);
+    }
+    // Peak RSSI across the window, where the backend tracks it: a peak far above the
+    // noise floor with zero bytes means the meter answered but we could not lock
+    // onto it (frequency/sync), while a flat floor means it never transmitted.
+    const int8_t peak = radio_->rx_peak_rssi_dbm();
+    if (peak != RadioHal::RSSI_UNKNOWN) {
+      ESP_LOGW(TAG, "RX window peak RSSI: %d dBm", (int) peak);
     }
     finish_rx_();
     return RxPoll::RX_POLL_ERROR;
