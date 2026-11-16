@@ -2,7 +2,7 @@
  * Nartis RF Meter - ESPHome Component
  *
  * Top-level orchestrator that ties together:
- *   Layer 1: CMT2300A HAL (SPI, registers, state machine)
+ *   Layer 1: RadioHal backend (SPI, registers, state machine) - radio_hal.h
  *   Layer 2: RF Data (framing, CRC-16/DNP, AES-128-GCM, channels)
  *   Layer 3: DLMS Client (proprietary read request/response)
  *
@@ -14,12 +14,13 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/log.h"  // LogString, for the state/status log helpers
 #include "esphome/core/preferences.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/button/button.h"
 
-#include "cmt2300a_hal.h"
+#include "radio_hal.h"
 #include "rf_data.h"
 #include "dlms_client.h"
 #include "helpers.h"
@@ -70,11 +71,10 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void loop() override;
   float get_setup_priority() const override { return esphome::setup_priority::DATA; }
 
-  void set_pin_sdio(esphome::InternalGPIOPin *p) { pin_sdio_ = p; }
-  void set_pin_sclk(esphome::InternalGPIOPin *p) { pin_sclk_ = p; }
-  void set_pin_csb(esphome::InternalGPIOPin *p) { pin_csb_ = p; }
-  void set_pin_fcsb(esphome::InternalGPIOPin *p) { pin_fcsb_ = p; }
-  void set_pin_gpio3(esphome::InternalGPIOPin *p) { pin_gpio3_ = p; }
+  /// The radio backend, already constructed and wired by code generation. The
+  /// component only ever sees the RadioHal interface, so which chip is on the
+  /// board is a YAML decision - and no CMT2300A register name is in scope here.
+  void set_radio(RadioHal *radio) { radio_ = radio; }
 
   /// Set the 12-digit meter serial (printed on the meter nameplate).
   void set_meter_serial(const std::string &s);
@@ -83,21 +83,28 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// Overrides serial/MAC derivation - use to impersonate a paired CIU exactly.
   void set_ciu_address(const std::string &hex) { ciu_address_ = hex; }
 
-  /// Pin the active-mode physical channel (0..3), bypassing the RSSI auto-scan.
-  /// The meter transmits/listens on a fixed bank (channel 0) and only encodes
-  /// the scanned index as a frame hint, so forcing the channel here is the lever
-  /// to match the meter when auto-select tunes to the wrong frequency.
-  void set_fix_channel(uint8_t ch) { fix_channel_ = static_cast<int8_t>(ch & 0x3); }
-
-  /// Use the alternative frequency presets (NARTIS_CUSTOM_CHANNELS) instead of
-  /// the default channel grid. The custom centres sit on the meter's
-  /// actually-observed reply frequencies so a 100 kHz + AFC RX can capture them;
-  /// the default presets are 97..278 kHz off and miss. Default: default presets.
-  /// Enabling this also enables RX channel-hop acquisition (see channel_hopping_enabled_).
-  void set_use_alternative_channels(bool enable) {
-    use_alternative_channels_ = enable;
-    hal_.set_use_custom_channels(enable);
+  /// Pin the meter reply channel (1..3), bypassing the RSSI auto-scan.
+  /// CIU->meter TX is always on CH0/433.82 MHz regardless of this setting.
+  /// Channel 0 is not a valid reply channel and is mapped to the default (2).
+  void set_fix_channel(uint8_t ch) {
+    fix_channel_ = (ch >= FIRST_REPLY_CHANNEL && ch <= LAST_REPLY_CHANNEL)
+                       ? static_cast<int8_t>(ch)
+                       : static_cast<int8_t>(DEFAULT_REPLY_CHANNEL);
   }
+
+  /// Use the alternative channel mode instead of the default channel grid: TX
+  /// stays on ch0/433.82 (the meter's wake frequency) while RX follows the
+  /// advertised channel's carrier. Those carriers are the meter's
+  /// actually-observed reply frequencies, so a 100 kHz + AFC RX can capture
+  /// them; in the default mode TX hops with RX and the meter is 97..278 kHz off
+  /// and missed. Default: default mode. Enabling this also enables RX
+  /// channel-hop acquisition (see channel_hopping_enabled_).
+  ///
+  /// The radio is not told about this flag: it only ever receives carriers in Hz
+  /// from channel_tx_hz()/channel_rx_hz() (radio_hal.h), which is where the two
+  /// modes differ.
+  /// DEPRECATED: TX is now always CH0/433.82; the flag no longer changes carriers.
+  void set_use_alternative_channels(bool enable) { use_alternative_channels_ = enable; }
 
   /// User-defined OBIS attributes read per get-request-with-list (1..10). Larger
   /// batches mean fewer cycles but bigger 0x43 responses. Default 1.
@@ -247,23 +254,39 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
 
   bool transmit_frame_(RfFrameType type, const uint8_t *payload, size_t len);
 
-  // Chunked RX - for packets > 64 bytes
-  enum class RxStatus : uint8_t {
-    IN_PROGRESS,
-    COMPLETE,
-    ERROR,
+  /* Outcome of one poll_rx_() call.
+   *
+   * Renamed from RxStatus (its values from IN_PROGRESS/COMPLETE/ERROR) when
+   * RadioHal arrived: RadioHal::RxStatus is what the radio reports about the
+   * FIFO, this is what the component concludes about the frame, and two
+   * same-named types in one scope - one of them a class member that would win
+   * every unqualified lookup inside this class - is a trap, not a convenience.
+   * The sibling component calls its equivalent RxPoll too. */
+  enum class RxPoll : uint8_t {
+    RX_POLL_IN_PROGRESS,  // partial frame, keep draining
+    RX_POLL_COMPLETE,     // hand the buffer to the parse step
+    RX_POLL_ERROR,        // the exchange failed: timeout, oversized frame, buffer overrun
+    RX_POLL_FAULT,        // the RADIO reported a fault; it is named in the log at that moment
   };
 
-  /// Begin chunked RX: configure INT1=FIFO_TH, prepare SDIO, arm ISR, enter RX.
+  /// Both ways an attempt can end badly. The callers treat them alike - abandon
+  /// this attempt and retry - but they are counted and logged apart, because
+  /// RX_POLL_ERROR says something about the link or the meter and RX_POLL_FAULT
+  /// says something about the board.
+  static bool rx_failed_(RxPoll p) { return p == RxPoll::RX_POLL_ERROR || p == RxPoll::RX_POLL_FAULT; }
+
+  /// Open a receive epoch on the radio and reset the accumulation state.
   void start_rx_();
 
-  /// Poll for incoming data. Drains ISR queue into accumulation buffer.
-  RxStatus poll_rx_();
+  /// Poll for incoming data. Drains the radio's FIFO into the accumulation buffer.
+  RxPoll poll_rx_();
 
-  /// Stop RX: disable ISR, go standby, clear state.
+  /// Stop RX: park the radio and clear state.
   void finish_rx_();
 
-  Cmt2300aHal hal_;
+  static const LogString *rx_status_to_string_(RxStatus status);
+
+  RadioHal *radio_{nullptr};
   RfDataLayer rf_;
   DlmsClient dlms_;
 
@@ -277,11 +300,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// Pack current time into 6-byte bit-packed RTC timestamp.
   void build_rtc_timestamp_(uint8_t *out);
 
-  esphome::InternalGPIOPin *pin_sdio_{nullptr};
-  esphome::InternalGPIOPin *pin_sclk_{nullptr};
-  esphome::InternalGPIOPin *pin_csb_{nullptr};
-  esphome::InternalGPIOPin *pin_fcsb_{nullptr};
-  esphome::InternalGPIOPin *pin_gpio3_{nullptr};
   std::string meter_serial_;
   std::string ciu_serial_;  // empty = use ESP32 MAC address
   std::string ciu_address_; // optional 16-hex-char full CIU address override
@@ -392,7 +410,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // single cycle (counters are saved at end-of-cycle and on abort).
   static constexpr uint32_t FRAME_COUNTER_MARGIN_ = 256;
 
-  bool use_alternative_channels_{false};  // mirrors HAL flag; gates channel hopping
+  bool use_alternative_channels_{false};  // selects the TX carrier rule; gates channel hopping
   uint8_t active_channel_{2};   // advertised+RX channel index; default ch2 = 434.26 MHz reply
   bool channel_locked_{false};  // true once the meter has replied on active_channel_
   uint8_t channel_hop_count_{0};
@@ -431,17 +449,25 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   size_t rx_expected_len_{0};
   bool rx_active_{false};
   uint32_t rx_tail_wait_ms_{0};  // 0 = not waiting; else millis() when tail-wait started
+  /// Attempts abandoned because the RADIO itself reported a fault (it was not in
+  /// RX, or a future backend's FIFO overflowed / SPI went quiet). Kept apart
+  /// from the no-reply and bad-frame paths on purpose: those two say something
+  /// about the link or the meter, this one says something about the board, and
+  /// conflating them is what sends a hardware fault to be debugged as poor
+  /// reception.
+  uint32_t radio_error_count_{0};
   uint32_t rx_drain_stall_ms_{0};  // millis() of last chunk-drain progress; 0 = none yet
-  // Tail-byte wait: at 2400 bps each byte takes ~3.3 ms, so up to
-  // (FIFO_TH_VALUE - 1) = 14 trailing bytes take ~47 ms to arrive. Must wait
-  // long enough that all of them are in the FIFO before we read by length.
+  // Tail-byte wait: at 2400 bps each byte takes ~3.3 ms, so the longest possible
+  // tail - (radio_->rx_chunk_size() - 1) = 14 bytes on the CMT2300A - takes
+  // ~47 ms to arrive. Must wait long enough that all of them are in the FIFO
+  // before we read by length.
   // Observed in practice: the on-air CRC `44 A8` read back as `00 00` with the
   // old 30 ms wait - i.e. we read the FIFO before the last 2 bytes had arrived.
   // 70 ms covers the 14-byte worst case with margin.
   static constexpr uint32_t RX_TAIL_WAIT_MS_ = 70;
   // Drain-stall recovery: once the packet is fully received the chip stops
-  // asserting RX_FIFO_TH even with a full chunk (>= FIFO_TH_VALUE) still unread
-  // in the FIFO - the chunk-drain then halts at a multiple of FIFO_TH_VALUE
+  // asserting its threshold signal even with a full chunk still unread in the
+  // FIFO - the chunk-drain then halts at a multiple of the chunk size
   // (observed 45/66, 75/93). If the drain has found nothing for this long while
   // bytes are still owed, reception is over and the remainder is sitting in the
   // 64 B FIFO; read it directly by length. Must exceed the in-flight inter-chunk

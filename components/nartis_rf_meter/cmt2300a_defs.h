@@ -370,52 +370,74 @@ static constexpr uint8_t NARTIS_TX_BANK[11] = {
     0x50, 0xC7, 0x03, 0x00, 0x42, 0xB0, 0x00, 0x8A, 0x18, 0x3F, 0x7F
 };
 
-/* 4-channel frequency presets (8 bytes each: 4 RX + 4 TX) */
-static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
-    {0x42, 0x6D, 0x8F, 0x1C, 0x42, 0x57, 0xDD, 0x1B},  // CH0: RX 434.10 / TX 433.82 MHz
-    {0x42, 0xBF, 0x47, 0x1B, 0x42, 0xA9, 0x95, 0x1A},  // CH1: RX 433.58 / TX 433.30 MHz
-    {0x42, 0xB2, 0xA4, 0x1D, 0x42, 0x9B, 0xF2, 0x1C},  // CH2: RX 434.54 / TX 434.26 MHz
-    {0x42, 0xF6, 0xB9, 0x1E, 0x42, 0xE0, 0x07, 0x1E},  // CH3: RX 434.98 / TX 434.70 MHz
-};
-
-/* Alternative frequency presets.
+/* 4-channel frequency presets (8 bytes each: 4 RX-half + 4 TX-half).
  *
- * Opt-in via YAML `use_alternative_channels: true`. This is the MEASURED
- * meter reply-frequency table, NOT a guess. The advertised channel index in
- * frame[12] bits 7:6 COMMANDS the meter's reply frequency - the meter answers
- * on a per-channel frequency and the CIU listens there (TX always stays on
- * Ch0/433.82, the meter's wake freq).
+ * These are MEASURED register values - RFPDK exports, confirmed on air - and
+ * they are the authority. Cmt2300aHal::set_frequency()/set_rx_frequency() take a
+ * carrier in Hz and resolve it back to the matching half of this table, writing
+ * these bytes unchanged; the AN199 formula below is only a loudly-logged
+ * fallback for a frequency that is not in the table at all.
  *
- * The meter replies on the advertised channel's STANDARD TX-half frequency:
- *   ch0->433.82  ch1->433.30  ch2->434.26  ch3->434.70 MHz.
- * The earlier "+/-1.7 MHz wander" was pure SDR ALIASING (e.g. ch1 433.30 ->
- * 435.35 at 434.4/2.048).
+ * The "RX" half holds the LOCAL OSCILLATOR, not the received carrier: this chip
+ * is a low-IF receiver and the received frequency is LO - IF. See the channel
+ * grid in radio_hal.h, which carries that explanation in full along with the
+ * carrier table (433.82 / 433.30 / 434.26 / 434.70 MHz) these blobs encode -
+ * that is RF433-1 protocol knowledge, not CMT2300A knowledge, so it lives
+ * there. Running AN199 forward over those four carriers reproduces all 32 bytes
+ * below exactly, which is how the two were checked against each other.
  *
- * IMPORTANT (low-IF receiver): the CMT2300A RX register sets the LO; the
- * received frequency is LO - IF, with IF ~= 280 kHz (= the spacing between every
- * standard channel's RX-half and TX-half). So to RECEIVE the meter's reply at a
- * channel's TX-half, the RX LO must be that channel's RX-half (TX-half + 280k).
- * Therefore each entry's RX-half here = the STANDARD channel's RX-half (the LO),
- * which down-converts the meter's TX-half reply; the TX-half is forced to
- * Ch0/433.82 (the probe frequency the meter wakes on). The advertised channel
- * and our RX channel MUST be the same index (handle_channel_select_).
- * ch2 (LO 434.54 -> receives 434.26) is the default.
+ * The alternative channel mode (YAML `use_alternative_channels: true`, the
+ * MEASURED meter reply behaviour) used to have its own byte table here. It did
+ * not need one: every entry of it was this table's RX-half for channel i paired
+ * with this table's TX-half for channel 0. That is now expressed where it
+ * belongs, as channel_tx_hz(ch, alternative) in radio_hal.h, so the two tables
+ * can no longer drift apart.
  */
-static constexpr uint8_t NARTIS_CUSTOM_CHANNELS[4][8] = {
-    {0x42, 0x6D, 0x8F, 0x1C, 0x42, 0x57, 0xDD, 0x1B},  // CH0: RX LO 434.10 (recv 433.82) / TX 433.82
-    {0x42, 0xBF, 0x47, 0x1B, 0x42, 0x57, 0xDD, 0x1B},  // CH1: RX LO 433.58 (recv 433.30) / TX 433.82
-    {0x42, 0xB2, 0xA4, 0x1D, 0x42, 0x57, 0xDD, 0x1B},  // CH2: RX LO 434.54 (recv 434.26) / TX 433.82 (DEFAULT)
-    {0x42, 0xF6, 0xB9, 0x1E, 0x42, 0x57, 0xDD, 0x1B},  // CH3: RX LO 434.98 (recv 434.70) / TX 433.82
+static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
+    {0x42, 0x6D, 0x8F, 0x1C, 0x42, 0x57, 0xDD, 0x1B},  // CH0: RX LO 434.10 (recv 433.82) / TX 433.82 MHz
+    {0x42, 0xBF, 0x47, 0x1B, 0x42, 0xA9, 0x95, 0x1A},  // CH1: RX LO 433.58 (recv 433.30) / TX 433.30 MHz
+    {0x42, 0xB2, 0xA4, 0x1D, 0x42, 0x9B, 0xF2, 0x1C},  // CH2: RX LO 434.54 (recv 434.26) / TX 434.26 MHz
+    {0x42, 0xF6, 0xB9, 0x1E, 0x42, 0xE0, 0x07, 0x1E},  // CH3: RX LO 434.98 (recv 434.70) / TX 434.70 MHz
 };
 // clang-format on
+
+/* ================================================================
+ * Synthesiser (CMOSTEK AN199) - fallback only
+ *
+ * Used ONLY when set_frequency()/set_rx_frequency() is handed a carrier that
+ * matches no entry of NARTIS_FREQ_CHANNELS. The proven blobs above are always
+ * preferred; recomputing them would be a silent behaviour change on a driver
+ * that works today.
+ *
+ *   FREQ_LO_tx = f_rf ;  FREQ_LO_rx = f_rf + XTAL/92  (low-IF)
+ *   word = floor(FREQ_LO * DIVIDER / XTAL * 2^20) ;  N = word>>20 ;  K = word & 0xFFFFF
+ *
+ * Verified: feeding the four channel carriers through this reproduces the 32
+ * bytes of NARTIS_FREQ_CHANNELS byte-for-byte.
+ * ================================================================ */
+static constexpr uint32_t XTAL_HZ = 26000000u;        // board crystal
+static constexpr uint32_t FREQ_DIVIDER = 4u;          // 420-510 MHz band
+static constexpr uint32_t FREQ_IF_HZ = XTAL_HZ / 92;  // RX LO offset above RF (282608 Hz)
+static constexpr uint8_t FREQ_VCO_BANK = 0x1;         // reg 0x1F <6:4>, 420-510 MHz
+static constexpr uint8_t FREQ_DIVX_CODE = 0x1;        // reg 0x1B <6:4>, 420-510 MHz
+static constexpr uint8_t FREQ_PALDO_SEL = 0x0;        // reg 0x1B bit7, TX < 500 MHz
+static constexpr uint8_t FREQ_FSK_SWT = 0x0;          // reg 0x1F bit7, RFPDK-fixed, freq-independent
+
+/* How far a requested carrier may sit from a table entry and still be served by
+ * that entry's proven bytes. The four carriers are 440 kHz apart at the closest,
+ * so 50 kHz cannot pull in the wrong neighbour, and nothing in this component
+ * ever asks for a frequency that is not exactly a table entry - the tolerance is
+ * only there so an off-by-a-rounding-step caller does not fall off the proven
+ * path silently. */
+static constexpr uint32_t FREQ_MATCH_TOLERANCE_HZ = 50000u;
 
 /* Runtime override values (applied after bank writes) */
 static constexpr uint8_t FIFO_MERGE_VALUE = 0x12;   // REG_SYS11: (reg & 0xE0) | 0x12 - merge TX+RX = 64B
 static constexpr uint8_t FIFO_TH_VALUE = 0x0F;      // REG_PKT29: (reg & 0xE0) | 0x0F - threshold = 15 bytes
 static constexpr uint8_t TX_REFILL_CHUNK = 15;       // Refill 15 bytes per TX_FIFO_TH event
 
-/* Number of frequency channels */
-static constexpr uint8_t NUM_CHANNELS = 4;
+/* The channel count moved to radio_hal.h as NUM_CHANNELS: how many channels
+ * RF433-1 has is a property of the protocol, not of this chip. */
 
 /* FIFO size when merged */
 static constexpr uint8_t FIFO_SIZE_MERGED = 64;
@@ -425,14 +447,9 @@ static constexpr uint32_t RESET_DELAY_MS = 20;
 static constexpr uint32_t STATE_POLL_TIMEOUT_MS = 10;
 static constexpr uint32_t STATE_POLL_INTERVAL_US = 100;
 
-/* ================================================================
- * Channel-scan constants
- * 1 initial warmup sample + RSSI_SCAN_LOOP_SAMPLES scored samples per channel,
- * RSSI_SCAN_SAMPLE_DELAY_US between each read.
- * Score is the trimmed mean: (sum - max - min) / (LOOP_SAMPLES - 2).
- * No RSSI threshold is used - channels are only ranked.
- * ================================================================ */
-static constexpr uint8_t  RSSI_SCAN_LOOP_SAMPLES = 6;
-static constexpr uint32_t RSSI_SCAN_SAMPLE_DELAY_US = 2000;
+/* The channel-scan constants that used to live here went with
+ * Cmt2300aHal::scan_channels(), a 66-line blocking survey that had no caller:
+ * the component runs its own survey in handle_rssi_scan_(). What they recorded
+ * about the STOCK device's algorithm is preserved as a comment there. */
 
 }  // namespace esphome::nartis_rf_meter

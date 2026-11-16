@@ -1,8 +1,13 @@
 /*
  * CMT2300A Hardware Abstraction Layer - Implementation
  *
- * Bit-bang 3-wire SPI driver for CMT2300A sub-GHz transceiver.
+ * Bit-bang 3-wire SPI driver for CMT2300A sub-GHz transceiver, exposed to the
+ * component through the RadioHal interface (radio_hal.h).
  * Handles register/FIFO access and chip state machine transitions.
+ *
+ * This backend is proven against live meters. Its register writes, timings and
+ * FIFO juggling are unchanged by the move to RadioHal: the methods were renamed
+ * and regrouped, not rewritten.
  */
 
 #include "cmt2300a_hal.h"
@@ -125,10 +130,6 @@ void Cmt2300aHal::write_reg(uint8_t addr, uint8_t val) {
   spi_write_reg(addr, val);
 }
 
-uint8_t Cmt2300aHal::read_reg(uint8_t addr) {
-  return spi_read_reg(addr);
-}
-
 void Cmt2300aHal::write_bank(uint8_t start_addr, const uint8_t *data, size_t len) {
   for (size_t i = 0; i < len; i++) {
     spi_write_reg(start_addr + i, data[i]);
@@ -229,9 +230,14 @@ void Cmt2300aHal::write_full_config() {
 
   write_bank(CMT_BANK_ADDR, NARTIS_CMT_BANK, CMT_BANK_SIZE);
   write_bank(SYSTEM_BANK_ADDR, NARTIS_SYSTEM_BANK, SYSTEM_BANK_SIZE);
-  // Frequency bank written per-channel (default to CH0). Honor the custom-channel
-  // flag so the initial bank matches what set_frequency_channel() will later write.
-  set_frequency_channel(0);
+  // Frequency bank: both halves of channel 0, exactly as the old
+  // set_frequency_channel(0) wrote here. Channel 0 is the only row whose bytes
+  // are the same in the default and the alternative channel mode, so this
+  // initial write never depended on which mode the YAML selected - and the
+  // component reprograms both halves at CHANNEL_SELECT before any traffic.
+  write_bank(FREQUENCY_BANK_ADDR, NARTIS_FREQ_CHANNELS[0], FREQUENCY_BANK_SIZE);
+  tx_freq_hz_ = CHANNEL_CARRIER_HZ[0];
+  rx_freq_hz_ = CHANNEL_CARRIER_HZ[0];
   write_bank(DATA_RATE_BANK_ADDR, NARTIS_DATA_RATE_BANK, DATA_RATE_BANK_SIZE);
   write_bank(BASEBAND_BANK_ADDR, NARTIS_BASEBAND_BANK, BASEBAND_BANK_SIZE);
   write_bank(TX_BANK_ADDR, NARTIS_TX_BANK, TX_BANK_SIZE);
@@ -253,9 +259,16 @@ void Cmt2300aHal::apply_runtime_overrides() {
   // the chip onto the TX-half of the freq bank (regs 0x1C..0x1F).
   update_reg(REG_SYS2, 0xE0, 0x00);
 
-  // Sync word patch ("normal" mode = 0x72 F6 55 55). RFPDK default was
-  // F6 55 55 55 - the meter's correlator won't lock on the wrong byte. The
-  // stock CIU selects this variant via a persistent EEPROM byte.
+  // Sync word patch, "normal" protocol mode. The four writes below are the
+  // REGISTER bank PKT10..PKT13, not an air sequence: per CMOSTEK AN143 the sync
+  // bytes fill SYNC_VALUE from the top, so PKT13 goes out FIRST and the air order
+  // is 55 55 F6 72. The RFPDK default bank is F6 55 55 55 (= 55 55 55 F6 on air,
+  // the export's "Sync Value = 0x555555F6"); this patch extends the marker from one
+  // byte to two right ahead of the length byte, and the meter's correlator will not
+  // lock without it. The stock CIU selects this variant via a persistent EEPROM
+  // byte. Beware: fw/RF_PHY_SPEC.md sec. 4.4 and fw/FRAME_HEADER_SPEC.md:823 print
+  // the air order as "72 F6 55 55", i.e. this register listing read backwards - see
+  // the sync-word note in cc1101_defs.h for the full derivation.
   write_reg(REG_PKT10, 0x72);
   write_reg(REG_PKT11, 0xF6);
   write_reg(REG_PKT12, 0x55);
@@ -317,110 +330,131 @@ bool Cmt2300aHal::wait_for_state(uint8_t target_state, uint32_t timeout_ms) {
 }
 
 bool Cmt2300aHal::go_standby() {
+  // Leaving RX ends the receive epoch, whether or not the transition confirms:
+  // a chip that did not reach standby is certainly not still receiving the reply
+  // this epoch was opened for.
+  in_rx_ = false;
   spi_write_reg(REG_MODE_CTL, GO_STBY);
   return wait_for_state(STA_STBY);
 }
 
 bool Cmt2300aHal::go_sleep() {
+  in_rx_ = false;
   spi_write_reg(REG_MODE_CTL, GO_SLEEP);
   return wait_for_state(STA_SLEEP);
 }
 
-bool Cmt2300aHal::go_rx() {
-  // Must go STBY -> RFS -> RX
-  if (get_state() != STA_STBY) {
-    if (!go_standby()) return false;
+/* ================================================================
+ * Frequency
+ *
+ * The component speaks in carriers (Hz); this chip speaks in 4-byte synthesiser
+ * halves. The translation is a LOOKUP, not a computation, by design: the bytes
+ * in NARTIS_FREQ_CHANNELS are measured values that this driver is proven on air
+ * with, and recomputing them from AN199 - even though AN199 happens to reproduce
+ * them exactly today - would turn a working driver into one whose on-air
+ * frequency depends on a formula and a crystal constant. The formula is kept
+ * only for a carrier that is in no table row at all, and it says so loudly when
+ * it is used.
+ * ================================================================ */
+
+uint8_t Cmt2300aHal::resolve_channel_(uint32_t freq_hz, bool want_rx_half) const {
+  // The TX-half register value IS the carrier. The RX-half is the local
+  // oscillator, which on this low-IF receiver sits one IF above the carrier -
+  // so a carrier matches the RX-half of the row whose carrier it equals.
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+    const uint32_t carrier = CHANNEL_CARRIER_HZ[ch];
+    const uint32_t diff = (freq_hz > carrier) ? (freq_hz - carrier) : (carrier - freq_hz);
+    if (diff <= FREQ_MATCH_TOLERANCE_HZ) {
+      return ch;
+    }
   }
-
-  clear_rx_fifo();
-  clear_interrupt_flags();
-
-  spi_write_reg(REG_MODE_CTL, GO_RFS);
-  if (!wait_for_state(STA_RFS)) {
-    ESP_LOGE(TAG, "Failed to enter RFS");
-    return false;
-  }
-
-  spi_write_reg(REG_MODE_CTL, GO_RX);
-  if (!wait_for_state(STA_RX)) {
-    ESP_LOGE(TAG, "Failed to enter RX");
-    return false;
-  }
-
-  return true;
+  (void) want_rx_half;  // same row either way; the parameter documents the caller's intent
+  return NUM_CHANNELS;  // no match
 }
 
-bool Cmt2300aHal::go_tx() {
-  // Must go STBY -> TFS -> TX
-  if (get_state() != STA_STBY) {
-    if (!go_standby()) return false;
-  }
-
-  clear_interrupt_flags();
-
-  spi_write_reg(REG_MODE_CTL, GO_TFS);
-  if (!wait_for_state(STA_TFS)) {
-    ESP_LOGE(TAG, "Failed to enter TFS");
-    return false;
-  }
-
-  spi_write_reg(REG_MODE_CTL, GO_TX);
-  if (!wait_for_state(STA_TX)) {
-    ESP_LOGE(TAG, "Failed to enter TX");
-    return false;
-  }
-
-  return true;
+void Cmt2300aHal::compute_freq_half_(uint32_t lo_hz, bool rx_half, uint8_t *out4) {
+  // CMOSTEK AN199: word = floor(FREQ_LO * DIVIDER / XTAL * 2^20); N = word>>20,
+  // K = low 20 bits. 64-bit intermediate - the shifted product overflows 32 bits.
+  const uint32_t word = (uint32_t) ((((uint64_t) lo_hz * FREQ_DIVIDER) << 20) / XTAL_HZ);
+  const uint8_t n = (uint8_t) (word >> 20);
+  const uint32_t k = word & 0xFFFFFu;
+  out4[0] = n;
+  out4[1] = (uint8_t) (k & 0xFF);
+  out4[2] = (uint8_t) ((k >> 8) & 0xFF);
+  // The top byte of each half carries two fixed RFPDK bits beside K[19:16], and
+  // they differ between the halves: 0x1B holds PALDO_SEL|DIVX, 0x1F FSK_SWT|VCO_BANK.
+  out4[3] = rx_half ? (uint8_t) ((FREQ_PALDO_SEL << 7) | (FREQ_DIVX_CODE << 4) | ((k >> 16) & 0x0F))
+                    : (uint8_t) ((FREQ_FSK_SWT << 7) | (FREQ_VCO_BANK << 4) | ((k >> 16) & 0x0F));
 }
 
-void Cmt2300aHal::set_frequency_channel(uint8_t ch) {
-  if (ch >= NUM_CHANNELS) {
-    ESP_LOGW(TAG, "Invalid channel %d (max %d)", ch, NUM_CHANNELS - 1);
+bool Cmt2300aHal::ensure_standby_for_freq_() {
+  // Must be in standby to change frequency - the PLL re-locks on the way out.
+  if (get_state() == STA_STBY) {
+    return true;
+  }
+  return go_standby();
+}
+
+void Cmt2300aHal::write_freq_half_(const uint8_t *bytes4, bool rx_half) {
+  // The frequency bank is 8 bytes: [0..3] = RX-half (regs 0x18..0x1B, the local
+  // oscillator), [4..7] = TX-half (regs 0x1C..0x1F). Writing one half leaves the
+  // other carrier alone - which is what the alternative channel mode lives on:
+  // RX hops while TX stays on the meter's wake frequency.
+  write_bank(rx_half ? FREQUENCY_BANK_ADDR : (uint8_t) (FREQUENCY_BANK_ADDR + 4), bytes4, 4);
+}
+
+void Cmt2300aHal::set_frequency(uint32_t freq_hz) {
+  tx_freq_hz_ = freq_hz;
+  if (!initialized_) {
+    // Before init() there is no chip to write to; write_full_config() programs
+    // channel 0 and the component reprograms both carriers at CHANNEL_SELECT.
+    return;
+  }
+  ensure_standby_for_freq_();
+
+  const uint8_t ch = resolve_channel_(freq_hz, false);
+  if (ch < NUM_CHANNELS) {
+    write_freq_half_(&NARTIS_FREQ_CHANNELS[ch][4], false);
+    ESP_LOGD(TAG, "TX carrier %.3f MHz (channel %u preset)", freq_hz / 1e6f, ch);
     return;
   }
 
-  // Must be in standby to change frequency
-  bool was_not_standby = (get_state() != STA_STBY);
-  if (was_not_standby) {
-    go_standby();
-  }
-
-  const uint8_t (*channels)[8] = use_custom_channels_ ? NARTIS_CUSTOM_CHANNELS : NARTIS_FREQ_CHANNELS;
-  write_bank(FREQUENCY_BANK_ADDR, channels[ch], FREQUENCY_BANK_SIZE);
-
-  ESP_LOGD(TAG, "Set frequency channel %d (%s preset)", ch, use_custom_channels_ ? "custom" : "default");
+  uint8_t half[4];
+  compute_freq_half_(freq_hz, false, half);
+  write_freq_half_(half, false);
+  ESP_LOGW(TAG,
+           "TX carrier %.3f MHz matches no channel preset - synthesising the bank from AN199 "
+           "(%02X %02X %02X %02X). The presets are measured values; a computed one is UNPROVEN on air.",
+           freq_hz / 1e6f, half[0], half[1], half[2], half[3]);
 }
 
-void Cmt2300aHal::set_rx_channel(uint8_t ch) {
-  if (ch >= NUM_CHANNELS) {
-    ESP_LOGW(TAG, "Invalid RX channel %d (max %d)", ch, NUM_CHANNELS - 1);
+void Cmt2300aHal::set_rx_frequency(uint32_t freq_hz) {
+  rx_freq_hz_ = freq_hz;
+  if (!initialized_) {
     return;
   }
-  bool was_not_standby = (get_state() != STA_STBY);
-  if (was_not_standby) {
-    go_standby();
+  ensure_standby_for_freq_();
+
+  const uint8_t ch = resolve_channel_(freq_hz, true);
+  if (ch < NUM_CHANNELS) {
+    write_freq_half_(&NARTIS_FREQ_CHANNELS[ch][0], true);
+    ESP_LOGD(TAG, "RX carrier %.3f MHz (channel %u preset, LO sits %u Hz above it)", freq_hz / 1e6f, ch,
+             (unsigned) FREQ_IF_HZ);
+    return;
   }
 
-  // The frequency bank is 8 bytes: [0..3] = RX-half, [4..7] = TX-half. Write
-  // only the 4 RX bytes (regs 0x18..0x1B) so the TX frequency (set earlier to
-  // Ch0/433.82) is preserved - RX hops, TX stays on the meter's wake frequency.
-  const uint8_t (*channels)[8] = use_custom_channels_ ? NARTIS_CUSTOM_CHANNELS : NARTIS_FREQ_CHANNELS;
-  write_bank(FREQUENCY_BANK_ADDR, channels[ch], 4);
-
-  ESP_LOGD(TAG, "Set RX channel %d (%s preset, RX-only - TX unchanged)",
-           ch, use_custom_channels_ ? "custom" : "default");
+  // Low-IF: tune the LO one IF ABOVE the carrier the caller asked for.
+  uint8_t half[4];
+  compute_freq_half_(freq_hz + FREQ_IF_HZ, true, half);
+  write_freq_half_(half, true);
+  ESP_LOGW(TAG,
+           "RX carrier %.3f MHz matches no channel preset - synthesising the LO from AN199 "
+           "(%02X %02X %02X %02X). The presets are measured values; a computed one is UNPROVEN on air.",
+           freq_hz / 1e6f, half[0], half[1], half[2], half[3]);
 }
 
 void Cmt2300aHal::clear_fifo() {
   write_reg(REG_FIFO_CLR, FIFO_CLR_RX | FIFO_CLR_TX);
-}
-
-void Cmt2300aHal::clear_tx_fifo() {
-  write_reg(REG_FIFO_CLR, FIFO_CLR_TX);
-}
-
-void Cmt2300aHal::clear_rx_fifo() {
-  write_reg(REG_FIFO_CLR, FIFO_CLR_RX);
 }
 
 void Cmt2300aHal::reset_rx_fifo_full() {
@@ -430,21 +464,17 @@ void Cmt2300aHal::reset_rx_fifo_full() {
   write_reg(REG_FIFO_CLR, FIFO_RESTORE | FIFO_CLR_RX | FIFO_CLR_TX);
 }
 
-size_t Cmt2300aHal::write_fifo(const uint8_t *data, size_t len) {
+// RadioHal::read_rx_exact - the old read_fifo(), unchanged. This is how the
+// sub-threshold tail of a frame is collected: those last < FIFO_TH_VALUE bytes
+// never raise RX_FIFO_TH, so only a caller that already knows the frame length
+// can ask for them. Clamped to the merged FIFO size, which is all the chip can
+// be holding.
+size_t Cmt2300aHal::read_rx_exact(uint8_t *buf, size_t len) {
   if (len > FIFO_SIZE_MERGED) {
-    ESP_LOGW(TAG, "FIFO write truncated: %d > %d", (int) len, FIFO_SIZE_MERGED);
     len = FIFO_SIZE_MERGED;
   }
-  spi_write_fifo(data, len);
+  spi_read_fifo(buf, len);
   return len;
-}
-
-size_t Cmt2300aHal::read_fifo(uint8_t *data, size_t max_len) {
-  if (max_len > FIFO_SIZE_MERGED) {
-    max_len = FIFO_SIZE_MERGED;
-  }
-  spi_read_fifo(data, max_len);
-  return max_len;
 }
 
 void Cmt2300aHal::set_tx_payload_length(uint16_t len) {
@@ -461,74 +491,21 @@ void Cmt2300aHal::set_rx_payload_length() {
   set_tx_payload_length(511);
 }
 
-uint8_t Cmt2300aHal::scan_channels(int8_t *out_score) {
-  // Picks the quietest channel.
-  // Per channel: enable RSSI mode -> GO_RX -> 2 ms settle -> 1 initial sample,
-  //              6 more samples with 2 ms between each, track running max & min,
-  //              score = (sum_of_6 - max - min) / 4.
-  // Channel selection (preserves the ch0-never-picked quirk):
-  //   - best_ch starts at 0
-  //   - ch1 always seeds best_ch=1, best_score=ch1_score
-  //   - ch2/ch3 replace only if strictly less than current best
-  //   - ch0's score is computed but never compared, so ch0 is unreachable
+/* scan_channels() lived here: a 66-line blocking RSSI survey over all four
+ * channels with the stock device's trimmed-mean scoring and its
+ * channel-0-never-selected quirk. It had NO caller - the component runs its
+ * own survey in handle_rssi_scan_(), which is also where the stock algorithm
+ * it reproduced is now recorded - and it duplicated component logic inside a
+ * layer that is supposed to know nothing about channels. Removed with the
+ * move to RadioHal rather than carried into the interface. */
 
-  int8_t best_score = 127;
-  uint8_t best_ch = 0;
-
-  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-    go_standby();
-    set_frequency_channel(ch);
-    // Switch SYS11 to RSSI-valid mode: (SYS11 & 0xE0) | 0x01
-    update_reg(REG_SYS11, 0x1F, 0x01);
-
-    spi_write_reg(REG_MODE_CTL, GO_RX);
-    if (!wait_for_state(STA_RX)) {
-      ESP_LOGW(TAG, "scan_channels: failed to enter RX on channel %u", ch);
-      if (out_score != nullptr) out_score[ch] = 127;
-      continue;
-    }
-
-    esphome::delayMicroseconds(RSSI_SCAN_SAMPLE_DELAY_US);
-    int8_t initial = get_rssi_dbm();
-    int8_t max_seen = initial;
-    int8_t min_seen = initial;
-    int sum = 0;
-
-    for (uint8_t i = 0; i < RSSI_SCAN_LOOP_SAMPLES; i++) {
-      esphome::delayMicroseconds(RSSI_SCAN_SAMPLE_DELAY_US);
-      int8_t s = get_rssi_dbm();
-      sum += s;
-      if (s > max_seen) max_seen = s;
-      if (s < min_seen) min_seen = s;
-    }
-
-    int trimmed = (sum - max_seen - min_seen) / (RSSI_SCAN_LOOP_SAMPLES - 2);
-    int8_t score = static_cast<int8_t>(trimmed);
-
-    if (out_score != nullptr) out_score[ch] = score;
-    ESP_LOGD(TAG, "scan_channels: ch%u score=%d dBm (min=%d max=%d)",
-             ch, score, min_seen, max_seen);
-
-    // Comparison logic - preserve the ch0-unreachable quirk.
-    if (ch == 1) {
-      best_ch = 1;
-      best_score = score;
-    } else if (ch > 1 && score < best_score) {
-      best_ch = ch;
-      best_score = score;
-    }
-  }
-
-  go_standby();
-  // Restore SYS11 to FIFO merge config: (SYS11 & 0xE0) | FIFO_MERGE_VALUE
-  update_reg(REG_SYS11, 0x1F, FIFO_MERGE_VALUE);
-  set_frequency_channel(best_ch);
-
-  ESP_LOGI(TAG, "scan_channels: best channel %u (%d dBm)", best_ch, best_score);
-  return best_ch;
-}
-
-bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
+// RadioHal::transmit - the old transmit_chunked(), logic unchanged.
+//
+// The one addition the interface contract asks for is parking the chip in
+// standby on EVERY exit path, success included (the old code left it in TX
+// after TX_DONE). It costs nothing in sequence terms: every call site went
+// straight on to start_rx_(), which opened with go_standby() anyway.
+bool Cmt2300aHal::transmit(const uint8_t *data, size_t len) {
   // Fill FIFO with first 64B, enter TX, then poll TX_FIFO_TH via the GPIO3/INT2
   // pin to refill remaining data in 15-byte chunks.
 
@@ -559,6 +536,7 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   spi_write_reg(REG_MODE_CTL, GO_TFS);
   if (!wait_for_state(STA_TFS)) {
     ESP_LOGE(TAG, "Chunked TX: failed to enter TFS");
+    go_standby();  // contract: parked on every exit path
     return false;
   }
   spi_write_reg(REG_MODE_CTL, GO_TX);
@@ -568,20 +546,41 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
 
   // Poll: refill FIFO as it drains, wait for TX_DONE.
   // 600 ms covers the largest frame (~290 B ~ 480 ms airtime at 4800 bps). // this shall be 2400!
+  //
+  // KNOWN-WRONG NOTE, left exactly as found rather than quietly corrected: the
+  // link runs at 2400 bps, not 4800, so ~290 B is ~970 ms of airtime and the
+  // 600 ms cap could not cover it. The cap itself is NOT changed here - this is
+  // a proven driver and the real frames are far shorter than 290 B, so nothing
+  // has ever hit it - but whoever revisits TX timing should start from this:
+  // the number and its justification disagree, and it is the justification that
+  // is known to be wrong.
   static constexpr uint32_t TX_TIMEOUT_MS = 600;
   uint32_t start = esphome::millis();
 
   uint16_t refills = 0;  // diagnostic: how many TX_FIFO_TH refills we serviced
   while (esphome::millis() - start < TX_TIMEOUT_MS) {
-    // Check TX_DONE first - leave flag set for caller's is_tx_done() check
+    // Check TX_DONE first - the flag is deliberately left set (see the exit path)
     uint8_t int_clr1 = spi_read_reg(REG_INT_CLR1);
     if (int_clr1 & CLR1_TX_DONE_FLG) {
       ESP_LOGVV(TAG, "Chunked TX complete: %d/%d bytes written, %u refill(s)",
                (int) written, (int) len, refills);
       if (written < len) {
+        // KNOWN DIVERGENCE from the RadioHal contract, which says a frame the
+        // chip truncated is a failure - the meter hears something whose CRC
+        // cannot check out and will never answer it, so the caller should be
+        // free to resend instead of spending a receive timeout on it. This
+        // backend returns true anyway, exactly as it always has: it is proven
+        // against live meters and turning a warning into an aborted exchange is
+        // a behaviour change that belongs in its own, separately-tested step.
+        // Flagged here rather than silently fixed.
         ESP_LOGW(TAG, "Chunked TX: TX_DONE but only %d/%d bytes written - frame truncated on air!",
                  (int) written, (int) len);
       }
+      // The TX_DONE flag is deliberately left SET here, as it always has been.
+      // Nothing reads it any more - begin_rx() clears every latched flag when it
+      // opens the next epoch - but clearing it would be a register write this
+      // proven path has never done.
+      go_standby();  // contract: parked on every exit path
       return true;
     }
 
@@ -615,26 +614,18 @@ bool Cmt2300aHal::transmit_chunked(const uint8_t *data, size_t len) {
   return false;
 }
 
-uint8_t Cmt2300aHal::get_interrupt_flags() {
-  return spi_read_reg(REG_INT_FLAG);
-}
-
-uint8_t Cmt2300aHal::get_int_clr1() {
-  return spi_read_reg(REG_INT_CLR1);
-}
+/* get_interrupt_flags() / get_int_clr1() / is_pkt_ok() / is_tx_done() lived
+ * here. is_tx_done() was the component's TX-completion poll; transmit() now
+ * blocks to TX_DONE itself and parks the chip, so there is nothing left to ask
+ * about afterwards, and the other three went with it - is_pkt_ok() was never
+ * called at all (this link's packet engine runs fixed-length, so PKT_OK is not
+ * the end-of-frame signal; the frame's own LEN byte is). The TX poll loop in
+ * transmit() still reads REG_INT_CLR1 directly, exactly as it always did. */
 
 void Cmt2300aHal::clear_interrupt_flags() {
   write_reg(REG_INT_CLR1, CLR1_TX_DONE_CLR | CLR1_SL_TMO_CLR | CLR1_RX_TMO_CLR);
   write_reg(REG_INT_CLR2, CLR2_LBD_CLR | CLR2_PREAM_OK_CLR | CLR2_SYNC_OK_CLR |
                           CLR2_NODE_OK_CLR | CLR2_CRC_OK_CLR | CLR2_PKT_DONE_CLR);
-}
-
-bool Cmt2300aHal::is_pkt_ok() {
-  return (get_interrupt_flags() & FLAG_PKT_OK) != 0;
-}
-
-bool Cmt2300aHal::is_tx_done() {
-  return (get_int_clr1() & CLR1_TX_DONE_FLG) != 0;
 }
 
 int8_t Cmt2300aHal::get_rssi_dbm() {
@@ -643,25 +634,26 @@ int8_t Cmt2300aHal::get_rssi_dbm() {
   return static_cast<int8_t>(val);
 }
 
-uint8_t Cmt2300aHal::get_rssi_code() {
-  return spi_read_reg(REG_RSSI_CODE);
-}
+/* get_rssi_code() (the raw 0..255 code behind get_rssi_dbm()), get_fifo_flags()
+ * (REG_FIFO_FLAG - which reads 0xFF on this board and was therefore never
+ * usable) and read_gpio3() (the raw INT2 pin) were public and had no callers.
+ * Dropped rather than carried into RadioHal: all three expose CMT2300A
+ * internals that the interface is there to hide, and the one piece of real
+ * knowledge among them - that REG_FIFO_FLAG is unusable here - is recorded in
+ * drain_rx() and in the header, where it explains a design decision. */
 
 void Cmt2300aHal::set_rssi_mode(bool enable) {
   // SYS11 (0x16) low 5 bits: 0x01 = RSSI-valid mode (get_rssi_dbm() reads real
   // values), FIFO_MERGE_VALUE (0x12) = normal merged-FIFO packet mode.
+  //
+  // One field, two jobs: this is why RadioHal has a set_rssi_mode() at all.
+  // Leave it on and packet I/O is broken; never turn it on and get_rssi_dbm()
+  // reports nonsense. The RSSI survey must bracket itself with both calls.
   update_reg(REG_SYS11, 0x1F, enable ? 0x01 : FIFO_MERGE_VALUE);
 }
 
-uint8_t Cmt2300aHal::get_fifo_flags() {
-  return spi_read_reg(REG_FIFO_FLAG);
-}
-
-bool Cmt2300aHal::read_gpio3() {
-  return pin_read(gpio3_);
-}
-
-bool Cmt2300aHal::test_gpio3_wiring() {
+// RadioHal::self_test - the old test_gpio3_wiring(), unchanged.
+bool Cmt2300aHal::self_test() {
   // INT2 = RX_ACTIVE -> pin is high only while the chip sits in RX state.
   set_int_source(INT_SEL_RX_ACTIVE);
 
@@ -708,7 +700,87 @@ void Cmt2300aHal::prepare_rx_session() {
   update_reg(REG_FIFO_CTL, MASK_SPI_FIFO_RD_WR_SEL | MASK_FIFO_RX_TX_SEL, 0x00);
 }
 
-size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
+// RadioHal::begin_rx - what the component's start_rx_() used to do inline, in
+// exactly the same order, because the order is load-bearing. Carried over from
+// the comment that used to sit there:
+//
+//   CRITICAL: the preceding TX left the merged FIFO in TX direction with the
+//   64-byte beacon still "occupying" it. Switch the merged FIFO back to RX
+//   direction FIRST, then fully reset it (clear + RESTORE pointers) - otherwise
+//   RX starts against a FIFO that already reads full/overflowed (FIFO_FLAG=0xFF)
+//   and we drain stale garbage. Order matters: direction -> restore -> clear.
+//
+// That satisfies the RadioHal epoch contract: go_standby() aborts whatever was
+// in flight, prepare_rx_session() + reset_rx_fifo_full() flush the merged FIFO
+// in the only order that works, clear_interrupt_flags() clears every latched
+// flag so the first one seen afterwards belongs to this epoch, and the two
+// transitions are confirmed before returning true.
+bool Cmt2300aHal::begin_rx() {
+  in_rx_ = false;
+
+  go_standby();
+
+  prepare_rx_session();      // RX FIFO direction + SDIO input
+  reset_rx_fifo_full();      // FIFO_RESTORE + clear RX/TX
+  clear_interrupt_flags();
+
+  // Route the INT line -> RX_FIFO_TH (the meter's RX mechanism). The pin
+  // goes HIGH while >= FIFO_TH_VALUE bytes await in the RX FIFO; the caller
+  // drains threshold chunks on that, and reads the trailing sub-threshold bytes
+  // by frame length. (TX left it on TX_FIFO_TH; this restores it for RX.)
+  set_int_source(INT_SEL_RX_FIFO_TH);
+
+  // Restore PAYLOAD_LENG to the large ceiling: the preceding TX shrank it to the
+  // TX frame size, which would otherwise cap this RX at (TX_len + 1) bytes and
+  // truncate the meter's longer reply (e.g. 45/66, 75/93).
+  set_rx_payload_length();
+
+  // Enter RX mode: STBY -> RFS -> RX. Both transitions are checked now; the
+  // inline version ignored them, which meant a chip that never reached RX looked
+  // exactly like a meter that never answered, and cost a full receive timeout to
+  // find out. Saying so here is the whole point of begin_rx() returning a bool.
+  spi_write_reg(REG_MODE_CTL, GO_RFS);
+  if (!wait_for_state(STA_RFS)) {
+    ESP_LOGE(TAG, "begin_rx: chip did not reach RFS (state=0x%02X)", get_state());
+    return false;
+  }
+  spi_write_reg(REG_MODE_CTL, GO_RX);
+  if (!wait_for_state(STA_RX)) {
+    ESP_LOGE(TAG, "begin_rx: chip did not reach RX (state=0x%02X)", get_state());
+    return false;
+  }
+
+  in_rx_ = true;
+  return true;
+}
+
+// RadioHal::drain_rx - the old poll_rx_drain(), draining logic unchanged, plus
+// an honest status.
+//
+// On what this chip CANNOT report, so that nobody reads the missing statuses as
+// "it never happens":
+//
+//   RX_STATUS_OVERFLOW - not detectable here. The only register that would say
+//     so is REG_FIFO_FLAG, and on this board it reads 0xFF (Control2 bank),
+//     which is why the whole receive path polls the GPIO3/INT2 pin instead. A
+//     status synthesised from the pin alone would be a guess, so overflow is
+//     simply never reported rather than faked. A real overflow presents as a
+//     frame whose software CRC-16/DNP fails, and is counted as a bad frame.
+//
+//   RX_STATUS_IO_ERROR - not reported. Detecting it would mean an SPI register
+//     read on every pass of ESPHome's loop() purely to check the bus is alive,
+//     on a bit-banged bus. The cost is real and the payoff is a condition that
+//     init()'s product-ID probe already catches.
+//
+//   RX_STATUS_NOT_IN_RX - reported, and free: in_rx_ is set only by a begin_rx()
+//     that confirmed STA_RX and cleared by everything that leaves RX, so it is
+//     answered from memory with no bus traffic at all.
+size_t Cmt2300aHal::drain_rx(uint8_t *buf, size_t buf_size, RxStatus &status) {
+  if (!in_rx_) {
+    status = RxStatus::RX_STATUS_NOT_IN_RX;
+    return 0;
+  }
+
   // RX_FIFO_TH-driven chunk drain. INT2 (=RX_FIFO_TH) surfaces on the GPIO3 pin
   // and is HIGH while >= FIFO_TH_VALUE bytes sit in the RX FIFO. We poll that pin
   // (the stock CIU reads the chip's INT output pin via MCU GPIO too; the SPI
@@ -716,13 +788,31 @@ size_t Cmt2300aHal::poll_rx_drain(uint8_t *buf, size_t buf_size) {
   // Drain full threshold chunks while the line is asserted.
   //
   // The trailing < FIFO_TH_VALUE bytes of a frame never raise RX_FIFO_TH; the
-  // caller (poll_rx_) reads that tail by frame length once it has arrived.
+  // caller reads that tail by frame length through read_rx_exact() once it has
+  // arrived. That is what rx_chunk_size() is for.
   size_t total = 0;
   while (total + FIFO_TH_VALUE <= buf_size && pin_read(gpio3_)) {
     spi_read_fifo(buf + total, FIFO_TH_VALUE);
     total += FIFO_TH_VALUE;
   }
+
+  status = (total > 0) ? RxStatus::RX_STATUS_DATA : RxStatus::RX_STATUS_NO_DATA;
   return total;
+}
+
+void Cmt2300aHal::dump_config() {
+  // Stored configuration only - no SPI traffic. ESPHome dumps a component even
+  // after mark_failed(), so this can run with no chip on the other end.
+  ESP_LOGCONFIG(TAG, "    Pins: SDIO=%d, SCLK=%d, CSB=%d, FCSB=%d, GPIO3=%d",
+                sdio_pin_ != nullptr ? sdio_pin_->get_pin() : -1,
+                sclk_pin_ != nullptr ? sclk_pin_->get_pin() : -1,
+                csb_pin_ != nullptr ? csb_pin_->get_pin() : -1,
+                fcsb_pin_ != nullptr ? fcsb_pin_->get_pin() : -1,
+                gpio3_pin_ != nullptr ? gpio3_pin_->get_pin() : -1);
+  ESP_LOGCONFIG(TAG, "    Carriers: TX %.3f MHz, RX %.3f MHz (RX LO is %u Hz above the RX carrier)",
+                tx_freq_hz_ / 1e6f, rx_freq_hz_ / 1e6f, (unsigned) FREQ_IF_HZ);
+  ESP_LOGCONFIG(TAG, "    RX drain: %u-byte threshold chunks off GPIO3/INT2, tail read by frame length",
+                (unsigned) FIFO_TH_VALUE);
 }
 
 }  // namespace esphome::nartis_rf_meter

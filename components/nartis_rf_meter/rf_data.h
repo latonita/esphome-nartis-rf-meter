@@ -70,11 +70,15 @@ class RfDataLayer {
   /// tag check is needed - the caller validates the embedded serial.
   bool extract_session_key(const uint8_t *payload, size_t len, uint8_t out_key[AES_KEY_SIZE]) const;
 
-  /// Set the channel index (0..3) and a representative RSSI (dBm) for
-  /// outgoing frames' channel_byte at [12]. RSSI is mapped via the
+  /// Set the reply-channel index (1..3) and a representative RSSI (dBm) for
+  /// outgoing frames' channel_byte at [12]. Channel 0 is not a valid reply
+  /// channel and is mapped to the default. RSSI is mapped via the
   /// formula `quality = clamp((rssi+130)/2, 1, 62)`.
   void set_channel_quality(uint8_t channel_idx, int8_t rssi_dbm) {
-    current_channel_ = channel_idx & 0x3;
+    current_channel_ = (channel_idx >= FIRST_REPLY_CHANNEL &&
+                        channel_idx <= LAST_REPLY_CHANNEL)
+                           ? channel_idx
+                           : DEFAULT_REPLY_CHANNEL;
     last_rssi_dbm_   = rssi_dbm;
   }
   uint8_t get_channel() const { return current_channel_; }
@@ -145,7 +149,11 @@ class RfDataLayer {
   /// Channel 0 is scanned but never selected by the meter.
   static uint8_t select_best_channel(const int8_t rssi[4]);
 
-  void set_channel(uint8_t ch) { current_channel_ = ch & 0x3; }
+  void set_channel(uint8_t ch) {
+    current_channel_ = (ch >= FIRST_REPLY_CHANNEL && ch <= LAST_REPLY_CHANNEL)
+                           ? ch
+                           : DEFAULT_REPLY_CHANNEL;
+  }
 
   /// TX-side counter (used in the AES-GCM nonce; auto-incremented per encrypted TX).
   uint32_t get_frame_counter() const { return frame_counter_; }

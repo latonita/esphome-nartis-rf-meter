@@ -1,8 +1,9 @@
 /*
- * CMT2300A Hardware Abstraction Layer
+ * CMT2300A Hardware Abstraction Layer - a RadioHal backend for RF433-1.
  *
  * Layer 1: Drives CMT2300A transceiver via bit-bang 3-wire SPI.
- * Zero knowledge of packets, protocols, or framing.
+ * Zero knowledge of packets, protocols, or framing - everything above the
+ * radio reaches it as opaque bytes through the RadioHal interface.
  *
  * Pin interface:
  *   SDIO  - bidirectional data (shared MOSI/MISO)
@@ -14,16 +15,28 @@
  *           GPIO3 can only output INT2 (not INT1), which is why INT2 is used.
  *
  * FIFO reception (polling, no ISR):
- *   The component's main loop calls poll_rx_drain() each iteration. It polls
+ *   The component's main loop calls drain_rx() each iteration. It polls
  *   the GPIO3/INT2 line - HIGH while >= FIFO_TH_VALUE unread bytes sit in the
  *   RX FIFO (RX_FIFO_TH, an auto-clearing level per the datasheet) - and burst-
  *   reads a full FIFO_TH_VALUE chunk via SPI each time the line is asserted.
  *   The trailing < FIFO_TH_VALUE bytes never raise RX_FIFO_TH, so the caller
- *   reads that tail by frame length once it has arrived.
+ *   reads that tail by frame length through read_rx_exact() once it has arrived.
+ *   That is the whole reason RadioHal has a read_rx_exact() and an
+ *   rx_chunk_size() at all.
  *
  *   We poll the physical pin rather than the SPI FIFO-flag register (0x6E):
  *   that register reads 0xFF here (Control2 bank), so it is unusable - matching
- *   the stock CIU, which also reads the chip's INT pin via MCU GPIO.
+ *   the stock CIU, which also reads the chip's INT pin via MCU GPIO. The same
+ *   fact is why drain_rx() cannot report RX_STATUS_OVERFLOW (see the .cpp).
+ *
+ * Frequency:
+ *   set_frequency() is the TX carrier and set_rx_frequency() the RX carrier;
+ *   they are independent and either may be changed at runtime between
+ *   exchanges. Both resolve the requested carrier back to the proven register
+ *   blobs in NARTIS_FREQ_CHANNELS and write those bytes unchanged - the AN199
+ *   formula is a loudly-logged fallback only. This chip is a low-IF receiver,
+ *   so the RX-half register value is the LO, one IF above the carrier; callers
+ *   never see that, they pass carriers.
  */
 
 #pragma once
@@ -31,39 +44,108 @@
 #include <cstdint>
 #include <cstddef>
 #include "cmt2300a_defs.h"
+#include "radio_hal.h"
 
 #include "esphome/core/gpio.h"  // gpio::Flags, InternalGPIOPin
 
 namespace esphome::nartis_rf_meter {
 
-class Cmt2300aHal {
+class Cmt2300aHal : public RadioHal {
  public:
   Cmt2300aHal() = default;
-  ~Cmt2300aHal();
+  ~Cmt2300aHal() override;
 
-  /// Set GPIO pins. Must be called before init().
+  const char *radio_name() const override { return "CMT2300A"; }
+
+  /// Set GPIO pins. Must be called before init(). Not part of RadioHal: the
+  /// bit-banged 3-wire bus is this chip's own business.
   void set_pins(esphome::InternalGPIOPin *sdio, esphome::InternalGPIOPin *sclk,
                 esphome::InternalGPIOPin *csb, esphome::InternalGPIOPin *fcsb,
                 esphome::InternalGPIOPin *gpio3);
 
   /// Initialize the CMT2300A: soft reset, verify chip, write full register config.
   /// Returns true on success.
-  bool init();
+  bool init() override;
 
-  /// Check if the chip is responding (read product ID register).
-  bool is_chip_connected();
+  /// TX carrier, Hz. Writes only the TX-half of the frequency bank (0x1C..0x1F).
+  /// May be called at runtime; parks the chip in standby first if it is not
+  /// already there, because the synthesiser registers cannot be changed under way.
+  void set_frequency(uint32_t freq_hz) override;
+
+  /// RX carrier, Hz. Writes only the RX-half of the frequency bank (0x18..0x1B),
+  /// leaving the TX-half alone - which is exactly what RF433-1's alternative
+  /// channel mode needs: RX hops while TX stays on the meter's wake frequency.
+  void set_rx_frequency(uint32_t freq_hz) override;
+
+  /// Chunked TX: write first 64B to FIFO, enter TX, poll TX_FIFO_TH to refill
+  /// remaining data in 15-byte chunks. Blocks to TX_DONE (~600 ms cap) and parks
+  /// the chip in standby. Returns true if TX_DONE was seen.
+  bool transmit(const uint8_t *frame, size_t len) override;
+
+  /// Start a verified RX epoch. Carries out, in this exact order, what the
+  /// component's start_rx_() used to do inline - the order is load-bearing, see
+  /// the comment on the implementation. Returns false if the chip did not reach
+  /// RFS or RX, in which case drain_rx() answers RX_STATUS_NOT_IN_RX.
+  bool begin_rx() override;
+
+  /// Drain whole FIFO_TH_VALUE chunks while the GPIO3/INT2 threshold line is
+  /// asserted. Returns bytes appended and sets `status`.
+  size_t drain_rx(uint8_t *buf, size_t buf_size, RxStatus &status) override;
+
+  /// Read `len` bytes straight out of the RX FIFO with no threshold signal -
+  /// how the sub-threshold tail of every frame is collected.
+  size_t read_rx_exact(uint8_t *buf, size_t len) override;
+
+  /// The threshold chunk: drain_rx() hands over bytes only in multiples of this.
+  size_t rx_chunk_size() const override { return FIFO_TH_VALUE; }
+
+  /// Honest bound, and it is a weak one. Unlike the sibling component's
+  /// CMT2300A backend, this drain is capped by nothing but the buffer it is
+  /// handed: it keeps reading threshold chunks for as long as the line stays
+  /// asserted, so a sender that keeps the FIFO topped up could in principle be
+  /// drained for more than one FIFO's worth in a single call. FIFO_SIZE_MERGED
+  /// is what it can return from an already-filled FIFO, which is the bound that
+  /// matters in practice at 2400 bps, where the chip cannot refill faster than
+  /// we read. No cap was ADDED here on purpose: this backend is proven against
+  /// live meters and a cap would change its draining behaviour.
+  ///
+  /// Nothing in this component currently decides anything from this number -
+  /// frames are bounded by their own LEN byte, and the "buffer full" check uses
+  /// the real buffer size - so the weakness costs nothing today. A backend whose
+  /// drain IS chunk-capped should report the true product (chunk * cap).
+  size_t max_drain_chunk() const override { return FIFO_SIZE_MERGED; }
+
+  /// Read RSSI in dBm (signed). Only meaningful with set_rssi_mode(true) active.
+  int8_t get_rssi_dbm() override;
+
+  /// Enable RSSI-valid mode (SYS11 low bits = 0x01) so get_rssi_dbm() returns real
+  /// values; pass false to restore the FIFO-merge config for normal packet I/O.
+  /// The two share one register field, so packet I/O is broken while RSSI mode
+  /// is on - this is not an optional nicety, it must be turned back off.
+  void set_rssi_mode(bool enable) override;
 
   /// Transition to Standby mode. Returns true if state reached within timeout.
-  bool go_standby();
+  bool go_standby() override;
 
-  /// Transition to Sleep mode.
-  bool go_sleep();
+  /// Transition to Sleep mode - the deep park between poll cycles.
+  bool go_sleep() override;
 
-  /// Transition to RX mode (via RFS -> RX).
-  bool go_rx();
+  /// One-time wiring self-test for the GPIO3/INT2 line. Temporarily routes
+  /// INT2 = RX_ACTIVE (high only while the chip is in RX), reads the pin in
+  /// STBY (expect low) and in RX (expect high), then restores INT2 = RX_FIFO_TH.
+  /// Returns true if the pin tracked the state (i.e. the chip's GPIO3 pad is
+  /// wired correctly to the configured pin_gpio3). Logs the raw readings either way.
+  bool self_test() override;
 
-  /// Transition to TX mode (via TFS -> TX).
-  bool go_tx();
+  /// Wiring and the carriers currently programmed, for the component's
+  /// dump_config(). Stored configuration only - no SPI traffic, because ESPHome
+  /// dumps a component even after it has been marked failed, i.e. possibly with
+  /// no chip on the other end of the bus.
+  void dump_config() override;
+
+ private:
+  /// Check if the chip is responding (read product ID register).
+  bool is_chip_connected();
 
   /// Read current chip state from MODE_STA register.
   uint8_t get_state();
@@ -71,30 +153,29 @@ class Cmt2300aHal {
   /// Wait for a specific state with timeout. Returns true if reached.
   bool wait_for_state(uint8_t target_state, uint32_t timeout_ms = STATE_POLL_TIMEOUT_MS);
 
-  /// Switch frequency registers to channel 0-3 (full TX+RX bank).
-  void set_frequency_channel(uint8_t ch);
+  /// Resolve a carrier to a NARTIS_FREQ_CHANNELS row, or NUM_CHANNELS if none is
+  /// within FREQ_MATCH_TOLERANCE_HZ. `want_rx_half` picks which half of the row
+  /// the carrier is compared against: the TX-half IS the carrier, the RX-half is
+  /// the carrier plus the low-IF offset.
+  uint8_t resolve_channel_(uint32_t freq_hz, bool want_rx_half) const;
 
-  /// Switch ONLY the RX-half of the frequency bank to channel 0-3, leaving the
-  /// TX-half untouched. Used for RX channel hopping so the probe keeps
-  /// transmitting on the previously-set (Ch0/433.82) frequency.
-  void set_rx_channel(uint8_t ch);
+  /// Fill a 4-byte frequency half from the AN199 formula. Fallback path only -
+  /// see the comment at its definition for why this is not the normal route.
+  static void compute_freq_half_(uint32_t lo_hz, bool rx_half, uint8_t *out4);
 
-  /// Select which channel table set_frequency_channel() reads from:
-  /// false (default) = standard NARTIS_FREQ_CHANNELS; true = NARTIS_CUSTOM_CHANNELS.
-  void set_use_custom_channels(bool enable) { use_custom_channels_ = enable; }
+  /// Park in standby if not already there, so the synthesiser registers can be
+  /// written. Returns true if the chip is (now) in standby.
+  bool ensure_standby_for_freq_();
+
+  /// Write a 4-byte half of the frequency bank. `rx_half` selects 0x18..0x1B
+  /// (RX / local oscillator) versus 0x1C..0x1F (TX).
+  void write_freq_half_(const uint8_t *bytes4, bool rx_half);
 
   void clear_fifo();
-
-  void clear_tx_fifo();
-
-  void clear_rx_fifo();
 
   /// Full merged-FIFO reset for RX: FIFO_RESTORE + clear RX/TX. Use after a
   /// TX->RX direction switch so RX doesn't see leftover TX bytes.
   void reset_rx_fifo_full();
-
-  /// Write data to TX FIFO. Returns number of bytes written (limited by FIFO size).
-  size_t write_fifo(const uint8_t *data, size_t len);
 
   /// Set per-TX payload length (PKT14 high bits + PKT15 low byte).
   /// Must be written before every TX: the bank leaves the chip in fixed-length
@@ -106,96 +187,21 @@ class Cmt2300aHal {
   /// transmit; if left there, the packet engine caps the *next* RX at that
   /// size, truncating every incoming frame to (TX_len + 1) bytes. Restoring the
   /// ceiling lets the chip read the on-air length byte and accept the full
-  /// variable-length frame. Call from the RX-entry path before GO_RX.
+  /// variable-length frame. Called from begin_rx() before GO_RX.
   void set_rx_payload_length();
-
-  /// Chunked TX: write first 64B to FIFO, enter TX, poll TX_FIFO_TH to refill
-  /// remaining data in 15-byte chunks. Returns true if TX_DONE received.
-  /// Handles packets up to MAX_RF_FRAME_SIZE bytes.
-  bool transmit_chunked(const uint8_t *data, size_t len);
-
-  size_t read_fifo(uint8_t *data, size_t max_len);
-
-  uint8_t get_interrupt_flags();
-
-  /// Read INT_CLR1 register (0x6A) for TX_DONE flag.
-  uint8_t get_int_clr1();
 
   /// Clear all interrupt flags.
   void clear_interrupt_flags();
-
-  /// Check if a complete packet has been received (PKT_OK flag).
-  bool is_pkt_ok();
-
-  /// Check if TX is complete (TX_DONE flag in INT_CLR1).
-  bool is_tx_done();
-
-  /// Read RSSI in dBm (signed).
-  int8_t get_rssi_dbm();
-
-  /// Read raw RSSI code.
-  uint8_t get_rssi_code();
-
-  /// Enable RSSI-valid mode (SYS11 = ...|0x01) so get_rssi_dbm() returns real
-  /// values; pass false to restore the FIFO-merge config for normal packet I/O.
-  void set_rssi_mode(bool enable);
-
-  /// Scan all NUM_CHANNELS channels, return the channel index with the lowest
-  /// trimmed-mean RSSI. Picks the quietest channel:
-  ///   per channel: enable RSSI mode -> GO_RX -> 2 ms settle -> 1 initial sample,
-  ///                then 6 more samples with 2 ms between each,
-  ///                score = (sum_of_6 - max - min) / 4  (trimmed mean of middle 4).
-  /// Note: channel 0 is never selected (off-by-one quirk: ch0's score is computed
-  /// but never compared). This impl preserves that behavior so the meter's expectations
-  /// match - channels 1, 2, 3 are eligible; the device returns 1 if none is better.
-  /// If out_score is non-null, must point to at least NUM_CHANNELS int8_t and is
-  /// filled with each channel's trimmed-mean dBm score.
-  /// Leaves chip in STBY with FIFO merge restored, parked on the chosen channel.
-  uint8_t scan_channels(int8_t *out_score = nullptr);
-
-  /// Check FIFO flags register.
-  uint8_t get_fifo_flags();
-
-  /// Read GPIO3 pin state (interrupt line).
-  bool read_gpio3();
-
-  /// One-time wiring self-test for the GPIO3/INT2 line. Temporarily routes
-  /// INT2 = RX_ACTIVE (high only while the chip is in RX), reads the pin in
-  /// STBY (expect low) and in RX (expect high), then restores INT2 = RX_FIFO_TH.
-  /// Returns true if the pin tracked the state (i.e. the chip's GPIO3 pad is
-  /// wired correctly to the configured pin_gpio3). Logs the raw readings either way.
-  bool test_gpio3_wiring();
 
   /// Set the INT2 source field of REG_INT2_CTL. INT2 is routed to the GPIO3
   /// pad we poll for the FIFO-threshold signal (TX_FIFO_TH during TX,
   /// RX_FIFO_TH during RX).
   void set_int_source(uint8_t source);
 
-  /// Prepare the SDIO pin + FIFO control for an RX session. Call once
-  /// after entering RX mode, before the first poll_rx_drain() call.
+  /// Prepare the SDIO pin + FIFO control for an RX session. Called by begin_rx()
+  /// before entering RX mode.
   void prepare_rx_session();
 
-  /// Non-blocking poll: read REG_FIFO_FLAG via SPI and drain whatever
-  /// bytes are currently sitting in the RX FIFO into `buf`.
-  ///
-  /// Burst-reads a full FIFO_TH_VALUE chunk when the RX_FIFO_TH flag is
-  /// set, otherwise reads byte-by-byte (typical for the packet tail).
-  /// Stops at `buf_size` even if more bytes are pending.
-  ///
-  /// Returns the number of bytes appended to `buf` this call (0 if the
-  /// FIFO is empty).
-  size_t poll_rx_drain(uint8_t *buf, size_t buf_size);
-
-  void write_reg(uint8_t addr, uint8_t val);
-
-  uint8_t read_reg(uint8_t addr);
-
-  void write_bank(uint8_t start_addr, const uint8_t *data, size_t len);
-
-  /// Read-modify-write: (reg & ~mask) | (val & mask).
-  void update_reg(uint8_t addr, uint8_t mask, uint8_t val);
-
- private:
   /// Send 8 bits on SDIO (MSB first), SDIO configured as output.
   void spi_send_byte(uint8_t byte);
 
@@ -214,6 +220,12 @@ class Cmt2300aHal {
   /// FIFO read: FCSB low, read bytes, FCSB high.
   /// Assumes SDIO has already been set to input (prepare_rx_session()).
   void spi_read_fifo(uint8_t *data, size_t len);
+
+  void write_reg(uint8_t addr, uint8_t val);
+  void write_bank(uint8_t start_addr, const uint8_t *data, size_t len);
+
+  /// Read-modify-write: (reg & ~mask) | (val & mask).
+  void update_reg(uint8_t addr, uint8_t mask, uint8_t val);
 
   /// Set SDIO pin direction.
   void sdio_set_output();
@@ -247,7 +259,14 @@ class Cmt2300aHal {
   esphome::ISRInternalGPIOPin gpio3_;
 
   bool initialized_{false};
-  bool use_custom_channels_{false};  // false = default presets, true = NARTIS_CUSTOM_CHANNELS
+  /// Set by a begin_rx() that confirmed STA_RX, cleared by anything that leaves
+  /// RX. This is what lets drain_rx() answer RX_STATUS_NOT_IN_RX honestly without
+  /// adding an SPI state read to every poll of the loop.
+  bool in_rx_{false};
+  // Carriers currently programmed, Hz. Default to channel 0 both halves, which
+  // is what init()'s bank write puts in the chip.
+  uint32_t tx_freq_hz_{CHANNEL_CARRIER_HZ[0]};
+  uint32_t rx_freq_hz_{CHANNEL_CARRIER_HZ[0]};
 };
 
 }  // namespace esphome::nartis_rf_meter
