@@ -78,6 +78,7 @@ void NartisRfMeterComponent::start_cycle_() {
   // once per power-on), so it's NOT reset here.
   batch_start_idx_ = 0;
   batch_count_ = 0;
+  discard_next_response_ = false;
   for (auto &entry : sensors_) entry.last_value = DlmsValue{};
   // With a pinned channel, skip the RSSI scan and go straight to channel setup.
   set_state_(fix_channel_ >= 0 ? State::CHANNEL_SELECT : State::RSSI_SCAN);
@@ -724,6 +725,7 @@ void NartisRfMeterComponent::handle_state_() {
               ESP_LOGW(TAG, "GET cycle: max retries on data response - skipping batch (start=%u)",
                        batch_start_idx_);
               batch_start_idx_ += batch_count_;
+              discard_next_response_ = true;
             } else {
               ESP_LOGD(TAG, "GET cycle: priming engaged after %u req-beacon(s) - proceeding",
                        retry_count_);
@@ -1322,12 +1324,45 @@ bool NartisRfMeterComponent::handle_get_response_() {
                     "ignoring mismatched/stale response", got_count, batch_count_);
       return false;
     }
+    // A late reply to a skipped batch would arrive as the next response: drop it once.
+    if (discard_next_response_) {
+      discard_next_response_ = false;
+      ESP_LOGW(TAG, "GET response after a skipped batch - discarding possible late reply (start=%u)",
+               batch_start_idx_);
+      return false;
+    }
+    // Reject a value whose DLMS type/len differs from this sensor's last (a new type twice = real change).
+    for (uint8_t i = 0; i < got_count && (batch_start_idx_ + i) < sensors_.size(); i++) {
+      auto &e = sensors_[batch_start_idx_ + i];
+      if (!values[i].has_value() || e.learned_dtype == 0xFF) continue;
+      const bool var_len = (e.learned_dtype == 0x09 || e.learned_dtype == 0x0A || e.learned_dtype == 0x0C ||
+                            e.learned_dtype == 0x19 || e.learned_dtype == 0x01 || e.learned_dtype == 0x02);
+      if (values[i].dtype == e.learned_dtype && (var_len || values[i].raw_len == e.learned_len)) {
+        e.pending_dtype = 0xFF;
+        continue;
+      }
+      if (e.pending_dtype == values[i].dtype && e.pending_len == values[i].raw_len) {
+        e.learned_dtype = 0xFF;
+        e.pending_dtype = 0xFF;
+        continue;
+      }
+      e.pending_dtype = values[i].dtype;
+      e.pending_len = values[i].raw_len;
+      ESP_LOGW(TAG, "  sensor[%u] dlms_type 0x%02X/%uB != expected 0x%02X/%uB - ignoring, re-sending",
+               (unsigned) (batch_start_idx_ + i), values[i].dtype, values[i].raw_len, e.learned_dtype,
+               e.learned_len);
+      return false;
+    }
     // Store each result into the corresponding user-sensor slot.
     for (uint8_t i = 0; i < got_count && (batch_start_idx_ + i) < sensors_.size(); i++) {
       const uint8_t idx = batch_start_idx_ + i;
       const uint8_t *ob = sensors_[idx].obis.bytes;  // OBIS groups A.B.C.D.E.F
       if (values[i].has_value()) {
         sensors_[idx].last_value = values[i];
+        if (sensors_[idx].learned_dtype == 0xFF) {
+          sensors_[idx].learned_dtype = values[i].dtype;
+          sensors_[idx].learned_len = values[i].raw_len;
+        }
         ESP_LOGD(TAG, "  sensor[%u] OBIS %u.%u.%u.%u.%u.%u value OK (dlms_type=0x%02X, %u B)",
                  idx, ob[0], ob[1], ob[2], ob[3], ob[4], ob[5],
                  values[i].dtype, values[i].raw_len);
@@ -1345,6 +1380,7 @@ bool NartisRfMeterComponent::handle_get_response_() {
 void NartisRfMeterComponent::skip_current_batch_() {
   if (session_primed_) {
     batch_start_idx_ += batch_count_;  // skip this user batch
+    discard_next_response_ = true;
   }
 }
 

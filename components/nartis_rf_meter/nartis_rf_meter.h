@@ -54,6 +54,10 @@ struct SensorEntry {
   uint16_t class_id{3};   // Default: Register
   uint8_t attr_id{2};     // Default: value
   DlmsValue last_value{};
+  uint8_t learned_dtype{0xFF};  // type/len of last accepted value (pending_* = candidate new type)
+  uint8_t learned_len{0};
+  uint8_t pending_dtype{0xFF};
+  uint8_t pending_len{0};
 };
 
 class NartisRfMeterComponent : public esphome::PollingComponent {
@@ -338,6 +342,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   uint32_t state_entered_ms_{0};
   uint32_t session_start_ms_{0};  // millis() at update()/start_cycle_(); used to report session length at PUBLISH
   uint8_t retry_count_{0};
+  bool discard_next_response_{false};  // drop one response after a skipped batch (late reply)
   uint8_t resp_fail_retries_{0};  // consecutive unparseable 0x43 responses for the current batch
   // Runtime-configurable (YAML); seeded from the *_DEFAULT_ constants above.
   uint8_t user_batch_size_{USER_BATCH_SIZE_DEFAULT_};
