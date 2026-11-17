@@ -584,16 +584,18 @@ void NartisRfMeterComponent::handle_state_() {
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (payload_len >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
 
-        // Expected: 0x40 short-ack. Accept type-byte match even on CRC fail
-        // (noisy RX corrupts the trailing CRC bytes but the type byte is usually
-        // intact). On other type bytes, retry within the wait window before
-        // giving up.
-        if (t == RX_TYPE_SHORT_ACK) {
+        // Awake: 0x40 short-ack, or 0x5B request-ack (the meter is already in a
+        // session, e.g. right after a mode-6 confirmation or a previous read).
+        // 0x40 is accepted on a type-byte match even on CRC fail (noisy RX
+        // corrupts the trailing CRC bytes but the type byte is usually intact);
+        // 0x5B only when the frame parses, as in the Linux library. On other
+        // type bytes, retry within the wait window before giving up.
+        if (t == RX_TYPE_SHORT_ACK || (t == RX_TYPE_REQUEST_ACK && payload_len >= 0)) {
           lock_channel_();  // first contact in an already-paired session - pin the channel
           if (payload_len < 0) {
             ESP_LOGW(TAG, "Beacon response: 0x40 with parse fail (n=%d) - accepting", payload_len);
           } else {
-            ESP_LOGI(TAG, "Beacon response OK (type=0x40, payload=%d bytes)", payload_len);
+            ESP_LOGI(TAG, "Beacon response OK (type=0x%02X, payload=%d bytes)", t, payload_len);
             if (payload_len > 0) {
               ESP_LOGD(TAG, "Beacon payload: %s", format_hex_pretty(payload, payload_len).c_str());
             }
