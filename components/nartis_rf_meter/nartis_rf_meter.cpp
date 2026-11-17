@@ -494,8 +494,10 @@ void NartisRfMeterComponent::handle_state_() {
           install_session_key_(payload, n);
           rx_parse_retries_ = 0;
           set_state_(State::PAIR_MODE6_TX);
-        } else if (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK) {
-          // Some meters skip straight to keepalive/ack - treat as paired.
+        } else if (n >= 0 && (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK)) {
+          // Some meters skip straight to keepalive/ack - treat as paired. Only
+          // on a frame that fully parses: a corrupted or foreign 0x40/0x5B
+          // would otherwise mark us paired without the 0x53 key.
           ESP_LOGI(TAG, "Pairing: meter ready (0x%02X) - paired", t);
           paired_ = true;
           rx_parse_retries_ = 0;
@@ -533,6 +535,9 @@ void NartisRfMeterComponent::handle_state_() {
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
         // Expected: 0x5B keepalive. Accept type-byte match even on CRC fail.
         // (0x40 short-ack also acceptable - some meters skip keepalive after mode-6.)
+        // Left lenient on purpose: every other outcome here (noise, timeout)
+        // also proceeds to the wake, and the wake now requires a fully parsed
+        // 0x40/0x5B from our meter, so a bad frame here changes nothing.
         if (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK) {
           if (rekey_count_ > 0) {
             ESP_LOGI(TAG, "Re-key confirmed (meter replied 0x%02X) - restarting from the wake", t);
@@ -586,19 +591,14 @@ void NartisRfMeterComponent::handle_state_() {
 
         // Awake: 0x40 short-ack, or 0x5B request-ack (the meter is already in a
         // session, e.g. right after a mode-6 confirmation or a previous read).
-        // 0x40 is accepted on a type-byte match even on CRC fail (noisy RX
-        // corrupts the trailing CRC bytes but the type byte is usually intact);
-        // 0x5B only when the frame parses, as in the Linux library. On other
-        // type bytes, retry within the wait window before giving up.
-        if (t == RX_TYPE_SHORT_ACK || (t == RX_TYPE_REQUEST_ACK && payload_len >= 0)) {
+        // Only a frame that fully parses counts - CRC and OUR meter's address,
+        // as in the Linux library. A corrupted frame or one from another
+        // device is noise: keep listening or re-send the beacon below.
+        if (payload_len >= 0 && (t == RX_TYPE_SHORT_ACK || t == RX_TYPE_REQUEST_ACK)) {
           lock_channel_();  // first contact in an already-paired session - pin the channel
-          if (payload_len < 0) {
-            ESP_LOGW(TAG, "Beacon response: 0x40 with parse fail (n=%d) - accepting", payload_len);
-          } else {
-            ESP_LOGI(TAG, "Beacon response OK (type=0x%02X, payload=%d bytes)", t, payload_len);
-            if (payload_len > 0) {
-              ESP_LOGD(TAG, "Beacon payload: %s", format_hex_pretty(payload, payload_len).c_str());
-            }
+          ESP_LOGI(TAG, "Beacon response OK (type=0x%02X, payload=%d bytes)", t, payload_len);
+          if (payload_len > 0) {
+            ESP_LOGD(TAG, "Beacon payload: %s", format_hex_pretty(payload, payload_len).c_str());
           }
           rx_parse_retries_ = 0;
           set_state_(State::READ_REQUEST_TX);
