@@ -114,6 +114,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// straight to the next batch. Saves ~4.5 s per batch. Default off.
   void set_skip_fin_beacons(bool enable) { skip_fin_beacons_ = enable; }
 
+  /// Reject a GET response whose DLMS invoke-id does not echo the request's.
+  /// The Nartis meter echoes it (verified on hardware); turn this off only for
+  /// a meter that does not, in which case the id is logged but not checked.
+  /// Default on.
+  void set_invoke_id_check(bool enable) { invoke_id_check_ = enable; }
+
   /// General RX wait before declaring "no response" (ms). Governs pairing waits
   /// and frame completion once a reply has started. Default 3000.
   void set_rx_timeout_ms(uint32_t ms) { rx_timeout_ms_ = ms; }
@@ -247,8 +253,30 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void handle_get_tx_();
   bool handle_get_response_();   // returns false if the response could not be parsed
   void handle_data_response_();  // shared 0x43 data-response handling for both GET wait states
+  /// Count one failed attempt of the current logical GET and re-send it (same
+  /// invoke-id and attribute list) after GET_RETRY_DELAY_MS_; when the budget
+  /// is spent, end the cycle without publishing.
+  void retry_get_(const char *reason);
+  /// True if the received frame parses (CRC, address) and has the given type.
+  bool validate_control_response_(uint8_t expected_type);
+  /// True if the received frame closes the current GET: a valid 0x40, or an
+  /// authenticated repeat of the reply just accepted (same invoke-id and
+  /// count). Never stores values and never moves the replay counter.
+  bool validate_close_response_();
+  /// The meter sent a valid SESSION_SETUP (0x53) during a read: install its
+  /// key, reset counters and confirm with mode-6, then restart from the wake
+  /// with a new priming GET, keeping the batches already read. Bounded by
+  /// MAX_REKEYS_PER_CYCLE_.
+  void begin_rekey_(const uint8_t *payload, int payload_len);
+  /// If the frame just received is a valid (CRC/address) 0x53, start the
+  /// re-key and return true; otherwise leave the state alone and return false.
+  bool try_session_setup_();
+  /// Install the data key carried by a 0x53 when it can be extracted and its
+  /// serial prefix matches, and reset the RF counters. Returns false (and
+  /// changes nothing) otherwise. Shared by pairing and mid-read re-key.
+  bool install_session_key_(const uint8_t *payload, int payload_len);
+  void reset_session_counters_();
   void advance_after_get_();
-  void skip_current_batch_();    // force-advance past the current batch (parse give-up)
   void handle_publish_();
   void handle_error_recovery_();
 
@@ -312,7 +340,8 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   static constexpr uint16_t CLIENT_ADDRESS_ = 16;
   static constexpr uint16_t SERVER_ADDRESS_ = 1;
   static constexpr uint32_t RX_TIMEOUT_MS_DEFAULT_ = 3000;
-  static constexpr uint8_t MAX_RETRIES_ = 3;
+  // Poll beacons per GET request before the request itself is re-sent.
+  static constexpr uint8_t READ_MAX_POLLS_ = 3;
   // Steady-state GET reply wait. When the meter is listening it answers a
   // get-request in ~190 ms; a long wait only burns time when our request lands
   // in the meter's post-TX deaf window (it ignores frames that arrive too soon
@@ -323,8 +352,14 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // so a large frame is never aborted mid-flight. (Pairing keeps the long
   // timeout + PAIR_RETRY_DELAY_MS_ pacing - it's one-time and works.)
   static constexpr uint32_t RX_REPLY_TIMEOUT_MS_DEFAULT_ = 900;
-  // ~900 ms RX + ~250 ms TX ~ 1.15 s per probe; 6 spans a ~7 s deaf window.
+  // Failed attempts per logical GET, shared across every failure path (no
+  // reply, unexpected reply, no data after the poll beacons, stale or
+  // malformed data). An intermediate 0x5B does not reset it. Each re-send is
+  // paced by GET_RETRY_DELAY_MS_.
   static constexpr uint8_t GET_REPLY_MAX_RETRIES_ = 6;
+  static constexpr uint32_t GET_RETRY_DELAY_MS_ = 1000;
+  // Mid-read SESSION_SETUP (0x53) handshakes allowed per cycle.
+  static constexpr uint8_t MAX_REKEYS_PER_CYCLE_ = 2;
   // Pairing-step pacing - matches the real CIU's observed timings:
   //   * Retry after no response (probe->probe = 5755 ms, ACK->ACK = 5104 ms):
   //     combine TX (~200 ms) + RX_TIMEOUT_MS_ (3000 ms) + gate = ~5500 ms total.
@@ -359,9 +394,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   State state_{State::NOT_INITIALIZED};
   uint32_t state_entered_ms_{0};
   uint32_t session_start_ms_{0};  // millis() at update()/start_cycle_(); used to report session length at PUBLISH
-  uint8_t retry_count_{0};
-  bool discard_next_response_{false};  // drop one response after a skipped batch (late reply)
-  uint8_t resp_fail_retries_{0};  // consecutive unparseable 0x43 responses for the current batch
+  uint8_t retry_count_{0};       // poll beacons sent for the current GET request
+  uint8_t get_retry_count_{0};   // failed attempts of the current logical GET
+  bool get_retry_wait_{false};   // pace the next GET re-send by GET_RETRY_DELAY_MS_
+  bool wake_retry_wait_{false};  // a re-delivered 0x43 answered the wake: pause before re-beacon
+  uint8_t rekey_count_{0};       // mid-read 0x53 handshakes this cycle
+  bool invoke_id_check_{true};   // YAML invoke_id_check
   // Runtime-configurable (YAML); seeded from the *_DEFAULT_ constants above.
   uint8_t user_batch_size_{USER_BATCH_SIZE_DEFAULT_};
   uint32_t rx_timeout_ms_{RX_TIMEOUT_MS_DEFAULT_};
@@ -387,7 +425,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   uint8_t rssi_scan_ch_{0};
 
   bool paired_{false};       // set once the handshake completes this boot
-  bool session_primed_{false};  // set once the post-pairing normal-get priming completes
+  bool session_primed_{false};  // priming GET done for THIS read cycle (reset every cycle)
   uint8_t pair_retry_{0};
   static constexpr uint8_t MAX_PAIR_RETRIES_ = 5;
   // Consecutive failed read cycles while paired_. When this hits
@@ -425,6 +463,12 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
    */
   uint8_t batch_start_idx_{0};                 // index into sensors_ of current batch's first attr
   uint8_t batch_count_{0};                     // attrs in the currently-pending batch
+  /* DLMS invoke-id per logical GET (priming and each batch). Advances once per
+   * new GET, wraps at 16 and carries on across cycles; every re-send of the
+   * same GET keeps its id and attribute list. */
+  uint8_t next_get_invoke_id_{1};
+  uint8_t get_invoke_id_{0};
+  bool get_pending_{false};  // a logical GET is in flight (its id is assigned)
   static constexpr uint8_t USER_BATCH_SIZE_DEFAULT_ = 5;
 
   /* Noisy-RX retry-within-window state.

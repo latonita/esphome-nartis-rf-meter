@@ -63,11 +63,12 @@ class DlmsClient {
 
   /// Build a `get-request-with-list` APDU containing one or more attribute
   /// references. Format:
-  ///   c0 03  c1  <count>
+  ///   c0 03  (c0 | invoke_id)  <count>
   ///   <count x { class-id (2B BE) | OBIS (6B) | attr-id (1B) | access-sel (1B = 0x00) }>
-  /// Returns total bytes written, or 0 on error.
+  /// invoke_id is the 4-bit DLMS transaction id; a re-send of the same logical
+  /// GET must reuse it. Returns total bytes written, or 0 on error.
   size_t build_get_request_with_list(uint8_t *out, size_t max,
-                                     const AttrSpec *attrs, uint8_t count);
+                                     const AttrSpec *attrs, uint8_t count, uint8_t invoke_id = 1);
 
   /// Single-OBIS convenience wrapper - wraps a single attribute in the
   /// `with-list` form (count=1). Used for steady-state reads.
@@ -75,33 +76,44 @@ class DlmsClient {
                             const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
 
   /// Build a `get-request-normal` APDU (single attribute, c0 01 form).
-  /// This is the FIRST post-pairing read the meter issues. Format:
-  ///   c0 01  c1  <class-id 2B BE>  <OBIS 6B>  <attr-id 1B>  <access-sel 1B = 0x00>
-  /// The freshly-paired meter requires this normal-get (answered by a direct
-  /// 0x43, no keepalive) before it will engage the with-list flow.
+  /// Used only for the sacrificial priming GET at the start of every read
+  /// cycle; its answer may arrive late and must never populate user sensors.
+  /// Format:
+  ///   c0 01  (c0 | invoke_id)  <class-id 2B BE>  <OBIS 6B>  <attr-id 1B>  <access-sel 1B = 0x00>
   /// Returns total bytes written (13), or 0 on error.
   size_t build_get_request_normal(uint8_t *out, size_t max,
-                                  const ObisCode &obis, uint16_t class_id, uint8_t attr_id);
+                                  const ObisCode &obis, uint16_t class_id, uint8_t attr_id,
+                                  uint8_t invoke_id = 1);
 
-  /// Parse a `get-response-with-list` (multi-result response).
-  /// Strips the Nartis prefix (0d fd f8 + 2B tag) and IEC 62056-47 wrapper if
-  /// present. Then walks the result list, filling `values[]` from left to right.
+  /// Parse a `get-response-with-list` (or, with expect_normal, a
+  /// `get-response-normal`). Strips an optional Nartis prefix (0d fd f8 + 2B
+  /// tag) and the required IEC 62056-47 wrapper, then fills `values[]` from
+  /// left to right.
   ///
   /// @param data    pointer to the decrypted payload (Nartis prefix + IEC + DLMS)
   /// @param len     total payload bytes
   /// @param values  caller-owned array of at least max_results DlmsValue slots
   /// @param max_results capacity of `values[]`
-  /// @param count_out actual number of results returned by the meter (<= max_results)
-  /// @return true if header parsed OK; individual result slots may carry NONE
-  ///         type if their data couldn't be parsed.
+  /// @param count_out number of results stored; 0 whenever false is returned
   /// @param class_ids optional array (parallel to the requested attributes, in
   ///        request order) of COSEM class-ids. When an entry is 8 (Clock) the
   ///        matching result is decoded as a date-time string instead of ASCII.
   ///        Pass nullptr to disable class-aware formatting.
+  /// @param expected_invoke_id reject a response whose invoke-id differs; -1 = don't check
+  /// @param expected_count reject a response with a different result count; -1 = don't check
+  /// @param expect_normal accept only get-response-normal instead of with-list
+  /// @param resp_invoke_out receives the response invoke-id (or -1 if the header was not reached)
+  /// @return true only for a complete, well-formed, matching response: IEC
+  ///         declared length equals the bytes present, every result parsed and
+  ///         no bytes left over. Access errors, nulls and compound values take
+  ///         invalid slots without shifting later results. On false, disregard
+  ///         all values.
   bool parse_read_response_list(const uint8_t *data, size_t len,
                                 DlmsValue *values, uint8_t max_results,
                                 uint8_t *count_out,
-                                const uint16_t *class_ids = nullptr);
+                                const uint16_t *class_ids = nullptr,
+                                int expected_invoke_id = -1, int expected_count = -1,
+                                bool expect_normal = false, int *resp_invoke_out = nullptr);
 
   /// Legacy single-attribute response parser (kept for backwards compat).
   bool parse_read_response(const uint8_t *data, size_t len, DlmsValue *value_out);
