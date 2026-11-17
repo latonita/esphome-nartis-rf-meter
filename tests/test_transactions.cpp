@@ -47,7 +47,11 @@ namespace esphome::nartis_rf_meter {
 void RfDataLayer::set_address(const RfAddress &a) { address_ = a; }
 void RfDataLayer::set_meter_address(const RfAddress &a) { meter_address_ = a; }
 void RfDataLayer::set_aes_key(const uint8_t *p) { memcpy(aes_key_, p, 16); }
-bool RfDataLayer::extract_session_key(const uint8_t *, size_t, uint8_t *) const { return false; }
+static bool test_key_ok = false;  // whether a 0x53 carries a usable key
+bool RfDataLayer::extract_session_key(const uint8_t *, size_t, uint8_t *key) const {
+  if (!test_key_ok) return false;
+  memcpy(key, "012345678901", 12); memset(key + 12, 0x5A, 4); return true;
+}
 size_t RfDataLayer::build_frame(uint8_t *out, size_t cap, RfFrameType type, uint8_t,
                                const uint8_t *p, size_t len) {
   last_tx.assign(p, p + len); if (cap < 2) return 0;
@@ -113,6 +117,9 @@ class Meter : public NartisRfMeterComponent {
   uint32_t tx_counter() const { return rf_.get_frame_counter(); }
   uint32_t nested_rx() const { return rf_.get_last_nested_rx_counter(); }
   bool paired() const { return paired_; }
+  void set_paired(bool p) { paired_ = p; }
+  void set_pair_retry(uint8_t r) { pair_retry_ = r; }
+  void rf_counter(uint32_t c) { rf_.set_frame_counter(c); }
   void accept(const std::vector<uint32_t> &v) { reply(frame(RX_TYPE_DATA, response(invoke(), v))); }
   FakeRadio radio;
 };
@@ -439,6 +446,37 @@ static void test_invoke_check_off_logs_only() {
   n.handle_get_tx_(); n.reply(frame(RX_TYPE_DATA, response(n.invoke(), {1, 2, 3})));
   assert(n.start() == 0 && !n.valid(0)); ++tests;
 }
+static void test_pairing_needs_the_key_before_mode6() {
+  // A 0x53 that does not parse, or carries no usable key, must never lead to
+  // mode-6: the meter would commit a key we do not have. Re-send the ACK.
+  auto start = [](Meter &m) {
+    m.set_meter_serial("012345678901"); m.set_paired(false);
+    m.set_pair_retry(1); m.rf_counter(7);
+  };
+  Bytes setup = frame(RX_TYPE_SESSION_SETUP, {1, 2, 3});
+  Bytes broken = setup; broken[1] = 0xFF;
+  test_key_ok = false;
+  for (const Bytes *b : {&setup, &broken}) {
+    Meter m(5); start(m);
+    m.feed(Meter::State::PAIR_ACK_WAIT_RESPONSE, *b); m.handle_state_();
+    if (b == &broken) {  // noise: listens again first, then gives up the window
+      assert(m.state() == Meter::State::PAIR_ACK_WAIT_RESPONSE);
+      test_now += 10000; m.inject(broken); m.handle_state_();
+    }
+    assert(m.state() == Meter::State::PAIR_ACK_TX);
+    assert(m.tx_counter() == 7 && !m.paired());
+    const auto sent = m.radio.tx_frames.size();
+    test_now += 2300; m.handle_state_();
+    assert(m.radio.tx_frames.size() == sent + 1);
+    assert(m.radio.last_tx_type() == uint8_t(RfFrameType::ACK));
+    // The meter repeats the 0x53; this time the key is usable.
+    test_key_ok = true;
+    m.handle_state_(); m.feed(Meter::State::PAIR_ACK_WAIT_RESPONSE, setup); m.handle_state_();
+    assert(m.state() == Meter::State::PAIR_MODE6_TX); assert(m.tx_counter() == 0);
+    test_key_ok = false;
+  }
+  ++tests;
+}
 int main() {
   // The next poll session needs a throwaway opener too. The original code
   // kept this flag set for the entire boot.
@@ -456,7 +494,7 @@ int main() {
   test_counters_saved_after_failed_cycle();
   test_mid_read_rekey_completes_with_mode6(); test_rekeys_are_bounded_and_wake_rekey();
   test_redelivered_data_at_wake_pauses_then_recovers(); test_request_ack_at_wake_is_awake();
-  test_invoke_check_off_logs_only();
+  test_invoke_check_off_logs_only(); test_pairing_needs_the_key_before_mode6();
   test_timer_wrap_and_abort_reprime();
   std::cout << tests << " regression scenarios passed\n";
 }
