@@ -1,26 +1,30 @@
-# Host regression tests and ESP32 build
+# Host regression tests
 
-Run from the repository root with a C++17 compiler supporting AddressSanitizer
-and UndefinedBehaviorSanitizer:
+Run from the repository root with a C++17 compiler that supports
+AddressSanitizer and UndefinedBehaviorSanitizer (GCC on Linux or WSL):
 
 ```sh
 sh tests/run.sh
 ```
 
-The temporary binaries are removed on exit. The runner stops on any failed
-assertion or sanitizer error. Leak detection is disabled; address and undefined
-behavior checks are enabled. No radio hardware or network is used by host tests.
+Temporary binaries are removed on exit. The runner stops on the first failed
+assertion or sanitizer error. Leak detection is off; address and undefined
+behaviour checks are on. No radio hardware or network is used.
 
-| Test program | Real code | Replaced boundary | Coverage |
+| Test program | Real code | Replaced | Coverage |
 | --- | --- | --- | --- |
-| `test_transactions.cpp` | Orchestrator, DLMS | ESPHome runtime, CMT2300A, RF encryption/framing | Repeated cycles with batch sizes 10/5/1; delayed responses; IDs including wrap; no-data/timeout retries; bounded failure and closure; no partial publication on transaction failure; priming and timer wrap |
-| `test_rf_integration.cpp` | Orchestrator, DLMS, RF CRC/AES-GCM | ESPHome runtime, physical CMT2300A | Two complete encrypted 16-sensor cycles, numeric/text publication, stale responses, authenticated duplicate closure, CRC/address/MIC failures, replay and non-mutating peek |
-| `test_dlms_parser.cpp` | DLMS | Logging | Typed values, access-error/null/compound slot alignment, clock, float, all sample truncations, length/count/ID rejection, 20,000 deterministic mutations |
+| `test_transactions.cpp` | Orchestrator state machine, DLMS client | ESPHome runtime, radio (`FakeRadio`), RF framing/encryption | Repeated cycles with batch sizes 10/5/1; priming on every cycle; invoke-id per GET incl. wrap; stale same-size reply rejected and the same GET re-sent; polls then re-send on "not ready"; bounded retry budget (a 0x5B cannot reset it); no skip and no publication on transaction failure; counters saved after a failed cycle; close accepts 0x40 or a repeat of the same reply, never stores it twice, bounded deadline; mid-read 0x53 completed with mode-6 and resumed at the same sensor; re-keys bounded per cycle; 0x53 at wake; re-delivered 0x43 at wake paused then recovered; `invoke_id_check: false`; timer wrap |
+| `test_rf_integration.cpp` | Orchestrator, DLMS client, RF CRC/AES-GCM | ESPHome runtime, radio (`FakeRadio`) | Two complete encrypted 16-sensor cycles, numeric/text publication, stale responses, authenticated duplicate at close, CRC/address/MIC failures, replay and non-mutating peek |
+| `test_dlms_parser.cpp` | DLMS client | Logging | Typed values, access-error/null/compound slot alignment, clock, float, all truncations, length/count/invoke-id rejection, 20,000 deterministic mutations |
 
-`rf_vectors.h` contains synthetic frames generated independently with Python's
-`cryptography` AES-GCM implementation and a bitwise CRC implementation. The test
-key is `00..0F`; addresses are fabricated. The vectors are committed, so Python
-packages are not required to run the C++ suite. To regenerate them:
+`fake_radio.h` implements `RadioHal` in memory: nothing is received through it
+(tests place a complete frame in the component's RX buffer and step the state
+machine) and every transmitted frame is recorded.
+
+`rf_vectors.h` holds synthetic frames generated independently with Python's
+`cryptography` AES-GCM and a bitwise CRC. The key is `00..0F`; the addresses are
+made up. The vectors are committed, so Python is not needed to run the tests.
+To regenerate them:
 
 ```sh
 python -m pip install cryptography
@@ -28,40 +32,22 @@ python tests/generate_rf_vectors.py
 git diff --exit-code -- tests/rf_vectors.h
 ```
 
-Compile the component with ESPHome as well:
+`build-check.yaml` is a compile-only ESP32 + CMT2300A fixture with 15 numeric
+sensors, a Clock text sensor and a re-pair button. It has dummy Wi-Fi
+credentials and a dummy meter serial: **do not flash it**.
 
 ```sh
-python -m venv .venv
-.venv/bin/pip install esphome==2026.10.2
-.venv/bin/esphome config tests/build-check.yaml
-.venv/bin/esphome compile tests/build-check.yaml
+esphome config tests/build-check.yaml
+esphome compile tests/build-check.yaml
 ```
 
-The fixture has 15 numeric sensors, one Clock text sensor and a re-pair button;
-it uses local component sources, ESP32 `esp32dev` and ESP-IDF. It deliberately
-contains dummy Wi-Fi credentials and meter serial: **do not flash this config**.
+What these tests do not cover: radio timing and real reception, flash/NVS
+wear and power loss, Home Assistant, and how a given meter firmware behaves.
+The behaviour modelled here was measured on a Nartis D101 with the Linux
+library that shares this protocol (invoke-id echo, priming per cycle, mid-read
+0x53 + mode-6, close answered by a repeat of the data, re-delivered 0x43 at the
+wake about 30 s after a read).
 
-## Validation performed for this change
-
-Host tests passed with GCC, AddressSanitizer and UndefinedBehaviorSanitizer:
-17 transaction scenarios, 3 RF/AES integration scenarios, and the parser suite
-including 20,000 mutations. Two regressions were first observed failing: priming
-was not reset on the next poll, and complete unrelated frames could bypass the
-closing wait's timeout. Both pass after the corresponding fixes.
-
-The complete ESP32 build passed with ESPHome 2026.10.2, ESP-IDF 5.5.6 and the
-Xtensa GCC 14.2 toolchain. `git diff --check` and fixture regeneration were also
-checked. The host compiler reports an existing signedness warning in
-`rf_data.cpp`'s encrypted RX size comparison; it is outside the modified paths.
-
-The execution environment needed a temporary build-tool workaround:
-`idf_component_manager/prepare_components/cmake_pid.py` raised
-`psutil.NoSuchProcess` while discovering its own PID. During compilation only,
-that exception used the module's documented `os.getppid()` fallback. The file
-was restored afterward. No component code or firmware behavior depends on this
-workaround; it is not a required change on a normal ESPHome installation.
-
-These tests do not exercise radio electrical timing, actual RF reception,
-flash/NVS endurance or power-loss behavior, Home Assistant integration, or the
-meter firmware's response to changing invoke IDs. Hardware acceptance steps and
-the investigation are in [the report](../docs/d101-response-recovery.md).
+The harness, the RF vectors and most transaction scenarios come from
+denis-isaev's `fix/dlms-response-recovery` branch, adapted to the `RadioHal`
+interface.
