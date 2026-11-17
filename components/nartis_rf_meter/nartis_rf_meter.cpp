@@ -470,30 +470,26 @@ void NartisRfMeterComponent::handle_state_() {
         uint8_t *const payload = rx_payload_buf_;
         RfFrameType rx_type;
         int n = rf_.parse_frame(rx_accum_buf_, rx_accum_len_, payload, sizeof(rx_payload_buf_), &rx_type);
-        // Determine type from parsed value when available; on parse failure
-        // (CRC/length error from a noise-corrupted frame), fall back to raw
-        // byte [1]. The transport-layer routing decision only needs the
-        // frame-type byte - even a CRC-broken 0x53 should advance us to
-        // mode-6 (the meter is already past the session-setup step on its
-        // side; sending mode-6 anyway closes the handshake cleanly).
+        // Only a fully parsed frame (CRC, our meter's address) can move the
+        // pairing on; anything else is noise. The raw type byte is used for
+        // logging only.
         const uint8_t raw_type = (rx_accum_len_ > 1) ? rx_accum_buf_[1] : 0;
         const uint8_t t = (n >= 0) ? static_cast<uint8_t>(rx_type) : raw_type;
-        if (t == RX_TYPE_SESSION_SETUP) {
+        if (n >= 0 && t == RX_TYPE_SESSION_SETUP) {
           // SESSION_SETUP - the meter ships the per-pairing data key it assigns
           // this CIU, GCM-encrypted under the factory default key (0x22 x16).
-          // We MUST extract it: the meter encrypts/decrypts all subsequent
-          // traffic with this key, and replies 0x40 forever if we keep using
-          // the bootstrap key. Extract + install, then acknowledge with the
-          // mode-6 plain reply.
-          if (n < 0) {
-            ESP_LOGW(TAG, "Pairing: SESSION_SETUP received but parse failed "
-                          "(n=%d, raw_type=0x%02X) - proceeding to mode-6 anyway", n, raw_type);
-          } else {
-            ESP_LOGI(TAG, "Pairing: SESSION_SETUP received (0x53) - proceeding");
-          }
-          install_session_key_(payload, n);
+          // We MUST have it before mode-6: mode-6 makes the meter commit the
+          // key, and without it every read fails until the next re-pair. If
+          // the key can't be extracted, re-send the ACK; the meter repeats
+          // the 0x53 (bounded by MAX_PAIR_RETRIES_).
+          ESP_LOGI(TAG, "Pairing: SESSION_SETUP received (0x53)");
           rx_parse_retries_ = 0;
-          set_state_(State::PAIR_MODE6_TX);
+          if (install_session_key_(payload, n)) {
+            set_state_(State::PAIR_MODE6_TX);
+          } else {
+            ESP_LOGW(TAG, "Pairing: 0x53 without a usable key - re-sending ACK");
+            set_state_(State::PAIR_ACK_TX);
+          }
         } else if (n >= 0 && (t == RX_TYPE_REQUEST_ACK || t == RX_TYPE_SHORT_ACK)) {
           // Some meters skip straight to keepalive/ack - treat as paired. Only
           // on a frame that fully parses: a corrupted or foreign 0x40/0x5B
@@ -1372,12 +1368,13 @@ bool NartisRfMeterComponent::validate_close_response_() {
   return true;
 }
 
-void NartisRfMeterComponent::install_session_key_(const uint8_t *payload, int payload_len) {
+bool NartisRfMeterComponent::install_session_key_(const uint8_t *payload, int payload_len) {
   // The 0x53 carries the data key the meter assigns this CIU (= ASCII(meter_SN)
   // + meter-chosen 4-byte suffix), GCM-encrypted under the factory default
   // key. The meter encrypts/decrypts all traffic with THIS key; without it the
   // meter can't read our GETs and replies 0x40 forever.
   uint8_t session_key[AES_KEY_SIZE];
+  bool installed = false;
   if (payload_len > 0 &&
       rf_.extract_session_key(payload, static_cast<size_t>(payload_len), session_key)) {
     // Sanity: the embedded 12-byte serial must match our configured meter.
@@ -1385,15 +1382,21 @@ void NartisRfMeterComponent::install_session_key_(const uint8_t *payload, int pa
                        (memcmp(session_key, meter_serial_.c_str(), 12) == 0);
     if (sn_ok) {
       rf_.set_aes_key(session_key);
+      installed = true;
       ESP_LOGI(TAG, "Session setup: installed meter-assigned data key (suffix %02X.%02X.%02X.%02X)",
                session_key[12], session_key[13], session_key[14], session_key[15]);
     } else {
       ESP_LOGW(TAG, "Session setup: 0x53 key serial mismatch - keeping current key");
     }
-  } else if (payload_len >= 0) {
+  } else {
     ESP_LOGW(TAG, "Session setup: could not extract data key from 0x53 - keeping current key");
   }
   memset(session_key, 0, sizeof(session_key));
+  if (installed) reset_session_counters_();
+  return installed;
+}
+
+void NartisRfMeterComponent::reset_session_counters_() {
   // A session setup restarts the counters on both sides.
   rf_.set_frame_counter(0);
   rf_.reset_rx_counter();
@@ -1410,7 +1413,9 @@ void NartisRfMeterComponent::begin_rekey_(const uint8_t *payload, int payload_le
   ESP_LOGW(TAG, "Meter sent SESSION_SETUP (0x53) mid-cycle - installing key and confirming with "
                 "mode-6 (re-key %u/%u, resuming at sensor %u)",
            rekey_count_, MAX_REKEYS_PER_CYCLE_, batch_start_idx_);
-  install_session_key_(payload, payload_len);
+  // Mid-read the meter is already in its new session and keeps re-sending
+  // 0x53 until mode-6, so confirm even without a usable key (as before).
+  if (!install_session_key_(payload, payload_len)) reset_session_counters_();
   // The new session needs its own priming GET and a fresh invoke-id; batches
   // already read stay stored.
   session_primed_ = false;
