@@ -481,6 +481,11 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   uint8_t rx_parse_retries_{0};
   static constexpr uint8_t MAX_RX_PARSE_RETRIES_ = 3;
 
+  /// Frames from another CIU (the meter's own display, or a second reader)
+  /// heard this cycle. poll_rx_() drops them and keeps listening without
+  /// touching rx_parse_retries_; the first one per cycle is logged as a warning.
+  uint16_t foreign_ciu_frames_{0};
+
   std::array<uint8_t, MAX_RF_FRAME_SIZE> tx_buf_{};
   std::array<uint8_t, MAX_RF_FRAME_SIZE> rx_buf_{};
 

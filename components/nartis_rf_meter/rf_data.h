@@ -130,6 +130,14 @@ class RfDataLayer {
                   uint8_t *payload_out, size_t payload_max,
                   RfFrameType *type_out);
 
+  /// True if `in` is a valid (CRC-checked) frame sent BY a CIU TO the meter -
+  /// the meter's own display, or another reader. Such frames carry a CIU frame
+  /// type at [1] (0x08/0x46/0x44/0x00, never used by the meter) and the
+  /// sender's own address at [2..9], whose device type [9] is not the meter's
+  /// 0x02. A radio never receives its own transmission, so such a frame is
+  /// never ours and never the meter's reply.
+  bool is_ciu_frame(const uint8_t *in, size_t in_len) const;
+
   /// Decrypt a nested encrypted frame found inside an RX 0x43 plain payload.
   /// Layout: 8 bytes prefix, then enc_flag=0x01, ccm=0x29, enc_data_len,
   /// 0x00, counter[4], ciphertext, MIC.
