@@ -55,7 +55,8 @@ void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uin
  * Format:
  *
  *   c0 03                          <- tag + type (get-request-with-list)
- *   c1                             <- invoke-id-priority
+ *   c0 | invoke_id                 <- invoke-id-and-priority: high priority,
+ *                                     confirmed service, 4-bit invoke-id
  *   N                              <- attribute-list count (1..10)
  *   [N x 10-byte attribute spec]:
  *     2 B    class-id (BE u16)     <- e.g. 00 01 = 1 (Data class)
@@ -63,12 +64,15 @@ void DlmsClient::set_credentials(const char *password, uint16_t client_addr, uin
  *     1 B    attr-id               <- e.g. 02 (value)
  *     1 B    access-selector       <- 0x00 (none)
  *
- * The legacy single-OBIS form is kept as `build_read_request_normal` for
- * reference but not used in the GET path.
+ * DLMS requires the server to copy the invoke-id into its response; the meter
+ * does (verified on hardware), so the id ties each answer to its request.
+ * The single-OBIS normal form is used only for the sacrificial priming GET at
+ * the start of each read cycle, never for user sensor batches.
  * ================================================================ */
 
 size_t DlmsClient::build_get_request_with_list(uint8_t *out, size_t max,
-                                               const AttrSpec *attrs, uint8_t count) {
+                                               const AttrSpec *attrs, uint8_t count,
+                                               uint8_t invoke_id) {
   if (count == 0 || count > MAX_LIST_ATTRS) return 0;
   // Each entry is 10 bytes (class 2 + OBIS 6 + attr 1 + access 1); header is 4.
   const size_t needed = 4 + 10u * count;
@@ -77,7 +81,7 @@ size_t DlmsClient::build_get_request_with_list(uint8_t *out, size_t max,
   size_t pos = 0;
   out[pos++] = 0xC0;   // tag = get-request
   out[pos++] = 0x03;   // type = get-request-with-list
-  out[pos++] = 0xC1;   // invoke-id-priority
+  out[pos++] = static_cast<uint8_t>(0xC0 | (invoke_id & 0x0F));  // invoke-id-and-priority
   out[pos++] = count;  // attribute-list count
 
   for (uint8_t i = 0; i < count; i++) {
@@ -109,15 +113,15 @@ size_t DlmsClient::build_read_request(uint8_t *out, size_t max,
 
 size_t DlmsClient::build_get_request_normal(uint8_t *out, size_t max,
                                             const ObisCode &obis, uint16_t class_id,
-                                            uint8_t attr_id) {
-  // c0 01 c1 <class 2B> <OBIS 6B> <attr 1B> <access-sel 1B> = 13 bytes.
+                                            uint8_t attr_id, uint8_t invoke_id) {
+  // c0 01 <invoke> <class 2B> <OBIS 6B> <attr 1B> <access-sel 1B> = 13 bytes.
   const size_t needed = 13;
   if (max < needed) return 0;
 
   size_t pos = 0;
   out[pos++] = 0xC0;   // tag = get-request
   out[pos++] = 0x01;   // type = get-request-normal
-  out[pos++] = 0xC1;   // invoke-id-priority
+  out[pos++] = static_cast<uint8_t>(0xC0 | (invoke_id & 0x0F));  // invoke-id-and-priority
   out[pos++] = static_cast<uint8_t>((class_id >> 8) & 0xFF);
   out[pos++] = static_cast<uint8_t>(class_id & 0xFF);
   memcpy(out + pos, obis.bytes, 6);
@@ -255,8 +259,11 @@ static int skip_typed_value(const uint8_t *data, size_t len) {
 
 bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
                                           DlmsValue *values, uint8_t max_results,
-                                          uint8_t *count_out, const uint16_t *class_ids) {
+                                          uint8_t *count_out, const uint16_t *class_ids,
+                                          int expected_invoke_id, int expected_count,
+                                          bool expect_normal, int *resp_invoke_out) {
   if (count_out) *count_out = 0;
+  if (resp_invoke_out) *resp_invoke_out = -1;
   if (len < 6) {
     ESP_LOGW(TAG, "list response too short (%u B)", (unsigned) len);
     return false;
@@ -278,10 +285,18 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
     ESP_LOGW(TAG, "list response: bad IEC version %02X %02X", data[pos], data[pos + 1]);
     return false;
   }
+  // The IEC declared length must cover exactly the APDU bytes present: a
+  // truncated or concatenated payload is not a response we can trust.
+  const size_t declared_len = be16(data + pos + 6);
+  if (declared_len != len - pos - 8) {
+    ESP_LOGW(TAG, "list response: IEC length mismatch (declared %u, available %u)",
+             (unsigned) declared_len, (unsigned) (len - pos - 8));
+    return false;
+  }
   pos += 8;  // skip wrapper (version + wPorts + length)
 
-  // DLMS get-response-with-list header
-  if (len < pos + 4) {
+  // DLMS get-response header: C4 03 <invoke> <count> (with-list) or C4 01 <invoke> (normal)
+  if (len < pos + (expect_normal ? 3 : 4)) {
     ESP_LOGW(TAG, "list response: too short for DLMS header");
     return false;
   }
@@ -289,23 +304,33 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
     ESP_LOGW(TAG, "list response: tag != 0xC4 (got 0x%02X)", data[pos]);
     return false;
   }
-  // Our user reads are always get-request-with-list, and the meter always
-  // answers them with get-response-with-list (0xC4 0x03) - even a 1-attr batch
-  // (a single-OBIS request still returns `C4 03 C1 01 ...`). The ONLY
+  // User reads are always get-request-with-list and the meter answers them
+  // with get-response-with-list (0xC4 0x03), even for a 1-attr batch. The only
   // thing that emits get-response-normal (0xC4 0x01) is the priming
-  // get-request-normal. The meter sometimes BUFFERS that priming answer and
-  // delivers it LATE, landing as the first 0x43 of the user-read phase. If we
-  // accepted the normal form here we'd store its stray scalar into the first
-  // batch slot (e.g. Voltage) - the bogus 5.4e17 V reading. Reject anything
-  // that isn't a with-list response so the caller re-sends the request and
-  // gets the real C4 03 answer.
-  if (data[pos + 1] != DLMS_RESP_WITH_LIST) {
-    ESP_LOGW(TAG, "list response: not get-response-with-list (got 0x%02X 0x%02X) - "
-                  "ignoring stale/mismatched response", data[pos], data[pos + 1]);
+  // get-request-normal, whose answer the meter sometimes delivers LATE, on the
+  // next GET. Accepting the normal form for a batch would store its stray
+  // scalar into the first slot (the bogus 5.4e17 V reading), so the form must
+  // match what was asked for.
+  const uint8_t want_form = expect_normal ? DLMS_RESP_NORMAL : DLMS_RESP_WITH_LIST;
+  if (data[pos + 1] != want_form) {
+    ESP_LOGW(TAG, "GET response: wrong form (got 0x%02X 0x%02X, want 0x%02X) - "
+                  "ignoring stale/mismatched response", data[pos], data[pos + 1], want_form);
     return false;
   }
-  uint8_t count = data[pos + 3];   // C4 03 <invoke> <count>
-  pos += 4;
+  const uint8_t invoke_id = data[pos + 2] & 0x0F;
+  if (resp_invoke_out) *resp_invoke_out = invoke_id;
+  if (expected_invoke_id >= 0 && invoke_id != (expected_invoke_id & 0x0F)) {
+    ESP_LOGW(TAG, "GET response: invoke-id mismatch (got %u, expected %u) - rejecting stale response",
+             invoke_id, (unsigned) (expected_invoke_id & 0x0F));
+    return false;
+  }
+  const uint8_t count = expect_normal ? 1 : data[pos + 3];  // normal has no count byte
+  if (count > max_results || (expected_count >= 0 && count != expected_count)) {
+    ESP_LOGW(TAG, "GET response: count mismatch (got %u, expected %d, capacity %u)",
+             count, expected_count, max_results);
+    return false;
+  }
+  pos += expect_normal ? 3 : 4;
 
   ESP_LOGD(TAG, "get-response: count=%u (max %u slots)", count, max_results);
 
@@ -369,6 +394,13 @@ bool DlmsClient::parse_read_response_list(const uint8_t *data, size_t len,
     }
   }
 
+  // Every announced result must have been walked and nothing may follow: a
+  // response cut short or carrying extra bytes is not trusted.
+  if (stored != count || pos != len) {
+    ESP_LOGW(TAG, "list response: incomplete/malformed results (%u/%u, %u trailing bytes)",
+             stored, count, (unsigned) (len - pos));
+    return false;
+  }
   if (count_out) *count_out = stored;
   return true;
 }
