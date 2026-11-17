@@ -74,6 +74,7 @@ CONF_BATCH_SIZE = "batch_size"
 CONF_RX_TIMEOUT = "rx_timeout"
 CONF_RX_REPLY_TIMEOUT = "rx_reply_timeout"
 CONF_SKIP_FIN_BEACONS = "skip_fin_beacons"
+CONF_INVOKE_ID_CHECK = "invoke_id_check"
 
 nartis_rf_meter_ns = cg.esphome_ns.namespace("nartis_rf_meter")
 NartisRfMeterComponent = nartis_rf_meter_ns.class_(
@@ -521,6 +522,10 @@ CONFIG_SCHEMA = cv.All(
             # and proceed straight to the next batch. Saves ~4.5 s per batch.
             # Default off.
             cv.Optional(CONF_SKIP_FIN_BEACONS, default=False): cv.boolean,
+            # Reject a GET reply whose DLMS invoke-id does not echo the request
+            # (a late answer to an earlier GET). The Nartis meter echoes it; set
+            # false only for a meter that does not - the id is then just logged.
+            cv.Optional(CONF_INVOKE_ID_CHECK, default=True): cv.boolean,
         }
     ).extend(cv.polling_component_schema("300s")),
 )
@@ -592,6 +597,7 @@ async def to_code(config):
     cg.add(var.set_rx_timeout_ms(config[CONF_RX_TIMEOUT]))
     cg.add(var.set_rx_reply_timeout_ms(config[CONF_RX_REPLY_TIMEOUT]))
     cg.add(var.set_skip_fin_beacons(config[CONF_SKIP_FIN_BEACONS]))
+    cg.add(var.set_invoke_id_check(config[CONF_INVOKE_ID_CHECK]))
 
     cg.add(var.set_meter_serial(config[CONF_METER_SERIAL]))
     if config[CONF_CIU_SERIAL]:
