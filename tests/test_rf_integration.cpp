@@ -140,13 +140,27 @@ static void test_corrupt_control_frames_cannot_advance() {
     m.receive(Meter::State::READ_WAIT_DATA, b);
     assert(m.state() == Meter::State::READ_REQUEST_TX && !m.primed());
   }
-  // Wake: a genuine 0x5B means awake; a 0x5B with a broken CRC does not.
-  {
-    Meter m; m.start_cycle_(); m.receive(Meter::State::WAKE_WAIT_ACK, fixtures::ACK5B);
+  // Wake: only a 0x40/0x5B that fully parses (CRC and our meter's address) is
+  // awake. A corrupted one or one from another device is noise.
+  auto foreign = [](Bytes b) { b[3] ^= 1; recalc_crc(b); return b; };
+  auto broken = [](Bytes b) { b.back() ^= 1; return b; };
+  for (const Bytes *ok : {&fixtures::ACK40, &fixtures::ACK5B}) {
+    Meter m; m.start_cycle_(); m.receive(Meter::State::WAKE_WAIT_ACK, *ok);
     assert(m.state() == Meter::State::READ_REQUEST_TX);
-    Meter c; c.start_cycle_(); auto b = fixtures::ACK5B; b.back() ^= 1;
-    c.receive(Meter::State::WAKE_WAIT_ACK, b);
-    assert(c.state() != Meter::State::READ_REQUEST_TX);
+    for (const Bytes &bad : {broken(*ok), foreign(*ok)}) {
+      Meter c; c.start_cycle_(); c.receive(Meter::State::WAKE_WAIT_ACK, bad);
+      assert(c.state() == Meter::State::WAKE_WAIT_ACK);  // still listening
+    }
+  }
+  // Pairing ACK-wait: a bad 0x40/0x5B must not mark the session paired and
+  // skip the 0x53 key; a genuine one still means "meter ready".
+  for (const Bytes *ok : {&fixtures::ACK40, &fixtures::ACK5B}) {
+    for (const Bytes &bad : {broken(*ok), foreign(*ok)}) {
+      Meter c; c.receive(Meter::State::PAIR_ACK_WAIT_RESPONSE, bad);
+      assert(c.state() == Meter::State::PAIR_ACK_WAIT_RESPONSE);  // re-armed, still waiting
+    }
+    Meter m; m.receive(Meter::State::PAIR_ACK_WAIT_RESPONSE, *ok);
+    assert(m.state() == Meter::State::WAKE_BEACON_TX);
   }
   ++scenarios;
 }
