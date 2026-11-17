@@ -404,6 +404,29 @@ static void test_redelivered_data_at_wake_pauses_then_recovers() {
   m.handle_state_(); m.feed(Meter::State::WAKE_WAIT_ACK, frame(RX_TYPE_SHORT_ACK)); m.handle_state_();
   assert(m.state() == Meter::State::READ_REQUEST_TX); ++tests;
 }
+static void test_request_ack_at_wake_is_awake() {
+  // A meter already in a session answers the wake beacon with 0x5B: that is
+  // awake, the same as 0x40, and the cycle goes on to the priming GET.
+  Meter m(5); m.start_cycle_();
+  const auto sent = m.radio.tx_frames.size();
+  m.feed(Meter::State::WAKE_WAIT_ACK, frame(RX_TYPE_REQUEST_ACK)); m.handle_state_();
+  assert(m.state() == Meter::State::READ_REQUEST_TX); assert(m.radio.tx_frames.size() == sent);
+  m.handle_get_tx_(); assert(last_tx[9] == 0x01);
+  // Same right after a mid-read re-key: mode-6 answered 0x5B, then the wake
+  // beacon is answered 0x5B again.
+  Meter r(5); r.handle_get_tx_();
+  r.feed(Meter::State::READ_WAIT_DATA, frame(RX_TYPE_SESSION_SETUP, {1})); r.handle_state_();
+  test_now += 5500; r.handle_state_(); r.handle_state_();
+  r.feed(Meter::State::PAIR_WAIT_READY, frame(RX_TYPE_REQUEST_ACK)); r.handle_state_();
+  r.handle_state_(); r.handle_state_(); assert(r.state() == Meter::State::WAKE_WAIT_ACK);
+  r.feed(Meter::State::WAKE_WAIT_ACK, frame(RX_TYPE_REQUEST_ACK)); r.handle_state_();
+  assert(r.state() == Meter::State::READ_REQUEST_TX); assert(!r.primed());
+  // A frame that does not parse is not "awake".
+  Meter n(5); n.start_cycle_();
+  n.feed(Meter::State::WAKE_WAIT_ACK, frame(0xFF)); n.handle_state_();
+  assert(n.state() != Meter::State::READ_REQUEST_TX);
+  ++tests;
+}
 static void test_invoke_check_off_logs_only() {
   Meter m(5); m.set_invoke_id_check(false); m.handle_get_tx_(); const auto id = m.invoke();
   test_logs.clear();
@@ -432,7 +455,8 @@ int main() {
   test_close_noise_cannot_extend_deadline();
   test_counters_saved_after_failed_cycle();
   test_mid_read_rekey_completes_with_mode6(); test_rekeys_are_bounded_and_wake_rekey();
-  test_redelivered_data_at_wake_pauses_then_recovers(); test_invoke_check_off_logs_only();
+  test_redelivered_data_at_wake_pauses_then_recovers(); test_request_ack_at_wake_is_awake();
+  test_invoke_check_off_logs_only();
   test_timer_wrap_and_abort_reprime();
   std::cout << tests << " regression scenarios passed\n";
 }

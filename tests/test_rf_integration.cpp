@@ -140,6 +140,14 @@ static void test_corrupt_control_frames_cannot_advance() {
     m.receive(Meter::State::READ_WAIT_DATA, b);
     assert(m.state() == Meter::State::READ_REQUEST_TX && !m.primed());
   }
+  // Wake: a genuine 0x5B means awake; a 0x5B with a broken CRC does not.
+  {
+    Meter m; m.start_cycle_(); m.receive(Meter::State::WAKE_WAIT_ACK, fixtures::ACK5B);
+    assert(m.state() == Meter::State::READ_REQUEST_TX);
+    Meter c; c.start_cycle_(); auto b = fixtures::ACK5B; b.back() ^= 1;
+    c.receive(Meter::State::WAKE_WAIT_ACK, b);
+    assert(c.state() != Meter::State::READ_REQUEST_TX);
+  }
   ++scenarios;
 }
 int main() {
