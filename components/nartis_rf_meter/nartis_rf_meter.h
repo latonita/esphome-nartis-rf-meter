@@ -271,10 +271,11 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   /// If the frame just received is a valid (CRC/address) 0x53, start the
   /// re-key and return true; otherwise leave the state alone and return false.
   bool try_session_setup_();
-  /// Install the data key carried by a 0x53 (when it can be extracted and its
-  /// serial prefix matches) and reset the RF counters. Shared by pairing and
-  /// mid-read re-key.
-  void install_session_key_(const uint8_t *payload, int payload_len);
+  /// Install the data key carried by a 0x53 when it can be extracted and its
+  /// serial prefix matches, and reset the RF counters. Returns false (and
+  /// changes nothing) otherwise. Shared by pairing and mid-read re-key.
+  bool install_session_key_(const uint8_t *payload, int payload_len);
+  void reset_session_counters_();
   void advance_after_get_();
   void handle_publish_();
   void handle_error_recovery_();
