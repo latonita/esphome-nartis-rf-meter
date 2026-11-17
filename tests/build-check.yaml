@@ -1,0 +1,113 @@
+# Compile-only fixture with dummy credentials/serial. Do not flash a device.
+esphome:
+  name: nartis-build-check
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+logger:
+  level: DEBUG
+wifi:
+  ssid: build-only
+  password: build-only-password
+api: {}
+ota:
+- platform: esphome
+external_components:
+- source:
+    type: local
+    path: ../components
+  components:
+  - nartis_rf_meter
+nartis_rf_meter:
+  id: nartis
+  meter_serial: "012345678901"
+  fix_channel: 2
+  update_interval: 5min
+  batch_size: 10
+  rx_reply_timeout: 2s
+  rx_timeout: 5s
+  invoke_id_check: true
+  radio:
+    type: cmt2300a
+    pin_sdio: GPIO19
+    pin_sclk: GPIO18
+    pin_csb: GPIO23
+    pin_fcsb: GPIO21
+    pin_gpio3: GPIO22
+sensor:
+- platform: nartis_rf_meter
+  name: Energy Total
+  obis_code: 1.0.1.8.0.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Energy T1
+  obis_code: 1.0.1.8.1.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Energy T2
+  obis_code: 1.0.1.8.2.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Energy T3
+  obis_code: 1.0.1.8.3.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Active Power
+  obis_code: 1.0.1.7.0.255
+- platform: nartis_rf_meter
+  name: Active Power A
+  obis_code: 1.0.21.7.0.255
+- platform: nartis_rf_meter
+  name: Active Power B
+  obis_code: 1.0.41.7.0.255
+- platform: nartis_rf_meter
+  name: Active Power C
+  obis_code: 1.0.61.7.0.255
+- platform: nartis_rf_meter
+  name: Voltage A
+  obis_code: 1.0.32.7.0.255
+  filters:
+  - multiply: 0.1
+- platform: nartis_rf_meter
+  name: Voltage B
+  obis_code: 1.0.52.7.0.255
+  filters:
+  - multiply: 0.1
+- platform: nartis_rf_meter
+  name: Voltage C
+  obis_code: 1.0.72.7.0.255
+  filters:
+  - multiply: 0.1
+- platform: nartis_rf_meter
+  name: Current A
+  obis_code: 1.0.31.7.0.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Current B
+  obis_code: 1.0.51.7.0.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Current C
+  obis_code: 1.0.71.7.0.255
+  filters:
+  - multiply: 0.001
+- platform: nartis_rf_meter
+  name: Frequency
+  obis_code: 1.0.14.7.0.255
+  filters:
+  - multiply: 0.01
+text_sensor:
+- platform: nartis_rf_meter
+  name: Meter Clock
+  obis_code: 0.0.1.0.0.255
+  obis_class: 8
+button:
+- platform: nartis_rf_meter
+  name: Re-pair
