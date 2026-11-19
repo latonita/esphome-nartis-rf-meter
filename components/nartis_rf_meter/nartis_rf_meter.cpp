@@ -88,6 +88,7 @@ void NartisRfMeterComponent::start_cycle_() {
   rekey_count_ = 0;
   pair_retry_ = 0;
   rx_parse_retries_ = 0;
+  foreign_ciu_frames_ = 0;
   // Prime EVERY cycle. Pairing (key, RF counters) survives between cycles, but
   // the meter treats the first GET of each wake session as a service request
   // whose answer can arrive on the NEXT GET. Priming makes that late answer a
@@ -1955,6 +1956,27 @@ NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
     rx_accum_len_ = rx_expected_len_;
     ESP_LOGVV(TAG, "RX complete: %d bytes", (int) rx_accum_len_);
     ESP_LOGV(TAG, "RX: %s", format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+
+    // A frame another CIU (the meter's own display, a second reader) sent to
+    // the meter: same channels, same format, and before the meter address is
+    // learned nothing else filters it. It is neither ours nor the meter's
+    // reply, so it must not use up the caller's re-arm/retry budget - drop it
+    // and keep listening. The window still ends at the caller's timeout
+    // (state_entered_ms_ is untouched), so constant display traffic cannot
+    // hold us here.
+    if (rf_.is_ciu_frame(rx_accum_buf_, rx_accum_len_)) {
+      foreign_ciu_frames_++;
+      const std::string sender = format_hex_pretty(rx_accum_buf_ + RF_TX_ADDR, RF_TX_ADDR_LEN);
+      if (foreign_ciu_frames_ == 1) {
+        ESP_LOGW(TAG, "Another display/reader (CIU %s) is talking to the meter - ignoring its "
+                      "frames; the meter may be busy with it", sender.c_str());
+      }
+      ESP_LOGD(TAG, "Ignored CIU frame type=0x%02X from %s (%u this cycle) - still listening",
+               rx_accum_buf_[RF_TX_FLAGS], sender.c_str(), (unsigned) foreign_ciu_frames_);
+      finish_rx_();
+      start_rx_();
+      return RxPoll::RX_POLL_IN_PROGRESS;
+    }
 
     // Peek-decode for the log: if the frame contains an encrypted body, run
     // the parser non-destructively and dump the decrypted plaintext. This is

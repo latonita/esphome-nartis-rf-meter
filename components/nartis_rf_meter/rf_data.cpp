@@ -517,6 +517,21 @@ size_t RfDataLayer::build_frame(uint8_t *out, size_t out_max,
  *   5. Else -> encrypted branch (rare in observed dataset).
  * ================================================================ */
 
+bool RfDataLayer::is_ciu_frame(const uint8_t *in, size_t in_len) const {
+  if (in_len < RF_TX_HDR_SIZE + 2) return false;
+  const uint8_t t = in[RF_TX_FLAGS];
+  if (t != static_cast<uint8_t>(RfFrameType::BEACON) && t != static_cast<uint8_t>(RfFrameType::DATA) &&
+      t != static_cast<uint8_t>(RfFrameType::ACK) && t != static_cast<uint8_t>(RfFrameType::PLAIN_DATA))
+    return false;
+  if (in[RF_TX_ADDR + RF_TX_ADDR_LEN - 1] == RF_DEVICE_TYPE_METER) return false;
+  // CRC last, and only for CIU-typed frames: a noise burst that happens to
+  // start with one of those bytes must not be mistaken for a display.
+  const size_t frame_size = static_cast<size_t>(in[RF_TX_LENGTH]) + 1;
+  if (frame_size > in_len || frame_size > sizeof(work_)) return false;
+  memcpy(work_, in, frame_size);
+  return crc_strip(work_, frame_size) >= 0;
+}
+
 int RfDataLayer::parse_frame(const uint8_t *in, size_t in_len,
                              uint8_t *payload_out, size_t payload_max,
                              RfFrameType *type_out) {
