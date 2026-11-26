@@ -281,6 +281,7 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   void handle_error_recovery_();
 
   bool transmit_frame_(RfFrameType type, const uint8_t *payload, size_t len);
+  void log_hex_(const char *dir, const uint8_t *data, size_t len);
 
   /* Outcome of one poll_rx_() call.
    *
