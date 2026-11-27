@@ -12,12 +12,14 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/time.h"
 
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 
 namespace esphome::nartis_rf_meter {
 
 static const char *const TAG = "nartis_rf_meter";
+static constexpr size_t ADDR_SIZE = 8;  // RF address length in bytes
 
 // Defined below (after the lifecycle methods); forward-declared so update() can
 // log the current state name.
@@ -71,10 +73,11 @@ void NartisRfMeterComponent::setup_continue_() {
   set_state_(State::IDLE);
 
   ESP_LOGI(TAG, "Nartis RF Meter ready. %d sensor(s) registered.", (int) sensors_.size());
-  ESP_LOGI(TAG, "AES key: %s", format_hex_pretty(aes_key_, AES_KEY_SIZE).c_str());
+  char hex_buf[format_hex_pretty_size(AES_KEY_SIZE)];
+  ESP_LOGI(TAG, "AES key: %s", format_hex_pretty_to(hex_buf, aes_key_, AES_KEY_SIZE, '.'));
   uint8_t addr_bytes[8];
   address_.to_bytes(addr_bytes);
-  ESP_LOGI(TAG, "RF address (8 bytes): %s", format_hex_pretty(addr_bytes, 8).c_str());
+  ESP_LOGI(TAG, "RF address (8 bytes): %s", format_hex_pretty_to(hex_buf, addr_bytes, ADDR_SIZE, '.'));
 }
 
 void NartisRfMeterComponent::start_cycle_() {
@@ -174,9 +177,12 @@ void NartisRfMeterComponent::load_pairing_state_() {
   uint8_t our_addr[8];
   address_.to_bytes(our_addr);
   if (memcmp(s.ciu_addr, our_addr, 8) != 0) {
+    char saved_hex[format_hex_pretty_size(ADDR_SIZE)];
+    char our_hex[format_hex_pretty_size(ADDR_SIZE)];
     ESP_LOGW(TAG, "Pairing restore: FAIL - saved session is for a different CIU address "
                   "(%s), our address is now %s - will re-pair",
-             format_hex_pretty(s.ciu_addr, 8).c_str(), format_hex_pretty(our_addr, 8).c_str());
+             format_hex_pretty_to(saved_hex, s.ciu_addr, ADDR_SIZE, '.'),
+             format_hex_pretty_to(our_hex, our_addr, ADDR_SIZE, '.'));
     return;
   }
 
@@ -195,8 +201,9 @@ void NartisRfMeterComponent::load_pairing_state_() {
   // (one frame) and reuses the restored key/counters.
   session_primed_ = false;
 
+  char meter_hex[format_hex_pretty_size(ADDR_SIZE)];
   ESP_LOGI(TAG, "Pairing restore: OK - meter=%s, frame_counter=%u (+%u margin), rx=%u, nested_rx=%u",
-           format_hex_pretty(s.meter_addr, 8).c_str(),
+           format_hex_pretty_to(meter_hex, s.meter_addr, ADDR_SIZE, '.'),
            (unsigned) s.frame_counter, (unsigned) FRAME_COUNTER_MARGIN_,
            (unsigned) s.last_rx_counter, (unsigned) s.last_nested_rx_counter);
 }
@@ -595,7 +602,7 @@ void NartisRfMeterComponent::handle_state_() {
           lock_channel_();  // first contact in an already-paired session - pin the channel
           ESP_LOGI(TAG, "Beacon response OK (type=0x%02X, payload=%d bytes)", t, payload_len);
           if (payload_len > 0) {
-            ESP_LOGD(TAG, "Beacon payload: %s", format_hex_pretty(payload, payload_len).c_str());
+            this->log_hex_("Beacon payload", payload, static_cast<size_t>(payload_len));
           }
           rx_parse_retries_ = 0;
           set_state_(State::READ_REQUEST_TX);
@@ -1003,7 +1010,8 @@ void NartisRfMeterComponent::capture_meter_address_() {
   rf_.set_meter_address(meter);
   uint8_t b[8];
   meter.to_bytes(b);
-  ESP_LOGI(TAG, "Meter address learned: %s", format_hex_pretty(b, 8).c_str());
+  char hex_buf[format_hex_pretty_size(ADDR_SIZE)];
+  ESP_LOGI(TAG, "Meter address learned: %s", format_hex_pretty_to(hex_buf, b, ADDR_SIZE, '.'));
 }
 
 void NartisRfMeterComponent::handle_pair_probe_tx_() {
@@ -1120,8 +1128,8 @@ void NartisRfMeterComponent::handle_beacon_tx_() {
     return;
   }
 
-  ESP_LOGV(TAG, "Beacon payload (%d bytes): %s", (int) payload_len,
-           format_hex_pretty(beacon_payload, payload_len).c_str());
+  ESP_LOGV(TAG, "Beacon payload (%d bytes)", (int) payload_len);
+  this->log_hex_("Beacon payload", beacon_payload, payload_len);
 
   // Mode-3 BEACON shares the beacon_seq_ counter with mode-6 MODE-6.
   size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
@@ -1285,9 +1293,8 @@ bool NartisRfMeterComponent::tx_dlms_apdu_(const uint8_t *apdu, size_t apdu_len)
   memcpy(plain + 8, apdu, apdu_len);
   const size_t plain_len = 8 + apdu_len;
 
-  ESP_LOGV(TAG, "DLMS TX plaintext (%d B = IEC[8] + DLMS[%d]): %s",
-           (int) plain_len, (int) apdu_len,
-           format_hex_pretty(plain, plain_len).c_str());
+  ESP_LOGV(TAG, "DLMS TX plaintext (%d B = IEC[8] + DLMS[%d])", (int) plain_len, (int) apdu_len);
+  this->log_hex_("DLMS TX plaintext", plain, plain_len);
 
   // Mode-2 encrypted ACK frame - uses data_seq_ (same counter as probe/ACK).
   size_t frame_len = rf_.build_frame(tx_buf_.data(), tx_buf_.size(),
@@ -1459,9 +1466,8 @@ bool NartisRfMeterComponent::handle_get_response_() {
              rx_accum_len_ > 1 ? rx_accum_buf_[1] : 0, payload_len);
     return false;
   }
-  ESP_LOGVV(TAG, "GET payload (%d bytes, type=0x%02X): %s",
-           payload_len, static_cast<uint8_t>(rx_type),
-           format_hex_pretty(payload, payload_len).c_str());
+  ESP_LOGVV(TAG, "GET payload (%d bytes, type=0x%02X):", payload_len, static_cast<uint8_t>(rx_type));
+  this->log_hex_("GET payload", payload, payload_len);
 
   // For a 0x43 the parse_frame payload is still the nested-encrypted envelope
   // (addr-echo + 01 29 len 00 + counter + ciphertext + tag). Decrypt the inner
@@ -1491,8 +1497,8 @@ bool NartisRfMeterComponent::handle_get_response_() {
     }
     dlms_ptr = dlms_buf;
     dlms_len = static_cast<size_t>(n);
-    ESP_LOGVV(TAG, "GET DLMS (%u B): %s", (unsigned) dlms_len,
-             format_hex_pretty(dlms_buf, dlms_len).c_str());
+    ESP_LOGVV(TAG, "GET DLMS (%u B):", (unsigned) dlms_len);
+    this->log_hex_("GET DLMS", dlms_buf, dlms_len);
   }
 
   DlmsValue *const values = rx_values_;
@@ -1708,10 +1714,23 @@ void NartisRfMeterComponent::handle_error_recovery_() {
   abort_to_idle_("Error recovery");
 }
 
+// Hex dump at VERY_VERBOSE, split into short lines: keeps the stack buffer small
+// and stays under the logger's line length limit.
+void NartisRfMeterComponent::log_hex_(const char *dir, const uint8_t *data, size_t len) {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERY_VERBOSE
+  static constexpr size_t CHUNK = 32;
+  char hex_buf[format_hex_pretty_size(CHUNK)];
+  for (size_t off = 0; off < len; off += CHUNK) {
+    size_t n = std::min(CHUNK, len - off);
+    ESP_LOGVV(TAG, "%s[%u]: %s", dir, static_cast<unsigned>(off), format_hex_pretty_to(hex_buf, data + off, n, '.'));
+  }
+#endif
+}
+
 bool NartisRfMeterComponent::transmit_frame_(RfFrameType type,
                                              const uint8_t *frame, size_t len) {
   ESP_LOGD(TAG, "TX frame (%d bytes, type=0x%02X):", (int) len, static_cast<uint8_t>(type));
-  ESP_LOGV(TAG, "TX: %s", format_hex_pretty(frame, len).c_str());
+  this->log_hex_("TX", frame, len);
   // One call for all frames - the backend chunks as its FIFO requires, and
   // blocks until the frame is out (AARQ can be ~80-100B after CRC framing,
   // beacons ~60-70B).
@@ -1739,7 +1758,8 @@ void NartisRfMeterComponent::derive_rf_address_() {
       address_ = RfAddress::from_bytes(b);
       uint8_t out[8];
       address_.to_bytes(out);
-      ESP_LOGI(TAG, "Using explicit CIU address: %s", format_hex_pretty(out, 8).c_str());
+      char hex_buf[format_hex_pretty_size(ADDR_SIZE)];
+      ESP_LOGI(TAG, "Using explicit CIU address: %s", format_hex_pretty_to(hex_buf, out, ADDR_SIZE, '.'));
       return;
     }
     ESP_LOGW(TAG, "Invalid ciu_address '%s' - falling back to derivation", ciu_address_.c_str());
@@ -1955,7 +1975,7 @@ NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
     // Trim to expected length (last chunk may have extra bytes)
     rx_accum_len_ = rx_expected_len_;
     ESP_LOGVV(TAG, "RX complete: %d bytes", (int) rx_accum_len_);
-    ESP_LOGV(TAG, "RX: %s", format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+    this->log_hex_("RX", rx_accum_buf_, rx_accum_len_);
 
     // A frame another CIU (the meter's own display, a second reader) sent to
     // the meter: same channels, same format, and before the meter address is
@@ -1966,13 +1986,14 @@ NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
     // hold us here.
     if (rf_.is_ciu_frame(rx_accum_buf_, rx_accum_len_)) {
       foreign_ciu_frames_++;
-      const std::string sender = format_hex_pretty(rx_accum_buf_ + RF_TX_ADDR, RF_TX_ADDR_LEN);
+      char sender[format_hex_pretty_size(RF_TX_ADDR_LEN)];
+      format_hex_pretty_to(sender, rx_accum_buf_ + RF_TX_ADDR, RF_TX_ADDR_LEN, '.');
       if (foreign_ciu_frames_ == 1) {
         ESP_LOGW(TAG, "Another display/reader (CIU %s) is talking to the meter - ignoring its "
-                      "frames; the meter may be busy with it", sender.c_str());
+                      "frames; the meter may be busy with it", sender);
       }
       ESP_LOGD(TAG, "Ignored CIU frame type=0x%02X from %s (%u this cycle) - still listening",
-               rx_accum_buf_[RF_TX_FLAGS], sender.c_str(), (unsigned) foreign_ciu_frames_);
+               rx_accum_buf_[RF_TX_FLAGS], sender, (unsigned) foreign_ciu_frames_);
       finish_rx_();
       start_rx_();
       return RxPoll::RX_POLL_IN_PROGRESS;
@@ -1990,18 +2011,18 @@ NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
                                      peek_buf, sizeof(rx_payload_buf_), &peek_type);
       const uint8_t raw_type = rx_accum_buf_[1];
       if (peek_len > 0) {
-        ESP_LOGV(TAG, "RX decoded (type=0x%02X, %d B plain%s): %s",
+        ESP_LOGV(TAG, "RX decoded (type=0x%02X, %d B plain%s)",
                  raw_type, peek_len,
-                 (raw_type == RX_TYPE_DATA || raw_type == RX_TYPE_SESSION_SETUP) ? " - nested-decrypted" : "",
-                 format_hex_pretty(peek_buf, peek_len).c_str());
+                 (raw_type == RX_TYPE_DATA || raw_type == RX_TYPE_SESSION_SETUP) ? " - nested-decrypted" : "");
+        this->log_hex_("RX decoded", peek_buf, peek_len);
         // Third line: for 0x43 the outer payload still wraps a nested-encrypted
         // DLMS APDU - decrypt it (non-mutating peek) and dump the inner plaintext.
         if (raw_type == RX_TYPE_DATA) {
           uint8_t *const dlms_buf = rx_dlms_buf_;
           int dlms_len = rf_.peek_nested_plain(peek_buf, peek_len, dlms_buf, sizeof(rx_dlms_buf_));
           if (dlms_len > 0) {
-            ESP_LOGV(TAG, "RX DLMS (%d B): %s", dlms_len,
-                     format_hex_pretty(dlms_buf, dlms_len).c_str());
+            ESP_LOGV(TAG, "RX DLMS (%d B)", dlms_len);
+            this->log_hex_("RX DLMS", dlms_buf, dlms_len);
           } else {
             ESP_LOGW(TAG, "RX DLMS: nested decrypt failed (err=%d)", dlms_len);
           }
@@ -2035,7 +2056,7 @@ NartisRfMeterComponent::RxPoll NartisRfMeterComponent::poll_rx_() {
     if (rx_accum_len_ > 0) {
       ESP_LOGW(TAG, "RX timeout (%d/%d bytes received in %dms)",
                (int) rx_accum_len_, (int) rx_expected_len_, (int) elapsed);
-      ESP_LOGD(TAG, "RX partial: %s", format_hex_pretty(rx_accum_buf_, rx_accum_len_).c_str());
+      this->log_hex_("RX partial", rx_accum_buf_, rx_accum_len_);
     } else {
       ESP_LOGW(TAG, "RX timeout (0/%d bytes received in %dms)",
                (int) rx_expected_len_, (int) elapsed);
