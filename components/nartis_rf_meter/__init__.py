@@ -477,6 +477,26 @@ def migrate_legacy_radio(config):
     return config
 
 
+def validate_use_alternative_channels(value):
+    """`use_alternative_channels` is accepted but ignored.
+
+    It once picked between two channel tables: one where TX hopped together with
+    RX, and the "alternative" one that holds TX on ch0/433.82 MHz (the meter's
+    wake frequency) and listens on the advertised reply channel. The alternative
+    behaviour is how the meter actually works, so it is now the only mode (see
+    the channel table note in radio_hal.h), and the receive carriers were the
+    same in both tables anyway. The key stays valid so existing configs build.
+    """
+    value = cv.boolean(value)
+    _LOGGER.warning(
+        "nartis_rf_meter: `%s` is deprecated and has no effect - the component "
+        "always transmits on 433.82 MHz and receives on the advertised reply "
+        "channel. Remove it from your config.",
+        CONF_USE_ALTERNATIVE_CHANNELS,
+    )
+    return value
+
+
 CONFIG_SCHEMA = cv.All(
     migrate_legacy_radio,
     cv.Schema(
@@ -489,13 +509,9 @@ CONFIG_SCHEMA = cv.All(
 
             cv.Optional(CONF_FIX_CHANNEL): cv.int_range(min=1, max=3),
 
-            # Use the alternative channel mode: transmit always on 433.82 MHz - the
-            # frequency the meter wakes on - while the advertised channel index
-            # commands the meter to reply on that channel's carrier, where we listen.
-            # This is a COMPONENT-level setting, not a radio one: it feeds
-            # channel_tx_hz() in radio_hal.h, which is where both backends get the
-            # carriers they are told to tune to. Default: off.
-            cv.Optional(CONF_USE_ALTERNATIVE_CHANNELS, default=False): cv.boolean,
+            # DEPRECATED, no effect: still accepted so existing configs build, and
+            # a warning is printed. See validate_use_alternative_channels().
+            cv.Optional(CONF_USE_ALTERNATIVE_CHANNELS): validate_use_alternative_channels,
             # CIU serial - for replacing an existing CIU unit;
             # if omitted, ESP32 MAC address is used (fresh pairing).
             cv.Optional(CONF_CIU_SERIAL, default=""): cv.string_strict,
@@ -588,10 +604,6 @@ async def to_code(config):
 
     if CONF_FIX_CHANNEL in config:
         cg.add(var.set_fix_channel(config[CONF_FIX_CHANNEL]))
-
-    # Component-level, not radio-level: it selects which carrier channel_tx_hz()
-    # hands the backend, and both backends are simply told a frequency.
-    cg.add(var.set_use_alternative_channels(config[CONF_USE_ALTERNATIVE_CHANNELS]))
 
     cg.add(var.set_batch_size(config[CONF_BATCH_SIZE]))
     cg.add(var.set_rx_timeout_ms(config[CONF_RX_TIMEOUT]))

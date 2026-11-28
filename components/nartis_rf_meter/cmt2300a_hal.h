@@ -73,8 +73,8 @@ class Cmt2300aHal : public RadioHal {
   void set_frequency(uint32_t freq_hz) override;
 
   /// RX carrier, Hz. Writes only the RX-half of the frequency bank (0x18..0x1B),
-  /// leaving the TX-half alone - which is exactly what RF433-1's alternative
-  /// channel mode needs: RX hops while TX stays on the meter's wake frequency.
+  /// leaving the TX-half alone - which is exactly what RF433-1's channel
+  /// scheme needs: RX hops while TX stays on the meter's wake frequency.
   void set_rx_frequency(uint32_t freq_hz) override;
 
   /// Chunked TX: write first 64B to FIFO, enter TX, poll TX_FIFO_TH to refill

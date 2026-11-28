@@ -432,7 +432,7 @@ static constexpr uint32_t CC1101_IF_HZ = (uint32_t) (((uint64_t) CC1101_FREQ_IF 
  * Defaults for the YAML-settable knobs
  * ================================================================ */
 
-/* Channel 0, 433.820 MHz - the meter's wake frequency and the alternative-mode TX
+/* Channel 0, 433.820 MHz - the meter's wake frequency and the (only) TX
  * carrier (see CHANNEL_CARRIER_HZ in radio_hal.h, which is the authority; this is a
  * resting value only). The component calls set_frequency()/set_rx_frequency() with
  * the selected channel before every exchange, so this is what the chip is tuned to

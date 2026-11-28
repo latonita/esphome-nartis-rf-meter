@@ -889,8 +889,8 @@ void NartisRfMeterComponent::handle_rssi_scan_() {
 void NartisRfMeterComponent::handle_channel_select_() {
   // The advertised channel index in frame[12] bits 7:6 COMMANDS the meter's
   // reply frequency. The meter answers on that channel's carrier
-  // (channel_rx_hz) and the CIU listens there; in alternative-channel mode TX
-  // always stays on Ch0/433.82 (the meter's wake freq). So the advertised
+  // (channel_rx_hz) and the CIU listens there; TX always stays on
+  // Ch0/433.82 (the meter's wake freq). So the advertised
   // channel and our RX channel MUST be the SAME index - then the meter replies
   // exactly where we listen. We default to ch2 (434.26, proven), and the hop
   // fallback moves advertised+RX together (hop_channel_).

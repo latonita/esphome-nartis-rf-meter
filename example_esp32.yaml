@@ -86,7 +86,6 @@ nartis_rf_meter:
   #                               # only alternative if nothing is ever received.
 
   meter_serial: "012345678901"    # 12 цифр с шильдика счётчика
-  use_alternative_channels: true  # альтернативная сетка частот (если счётчик не отвечает)
   batch_size: 10                  # читать до 10 атрибутов одним запросом
 
 sensor:

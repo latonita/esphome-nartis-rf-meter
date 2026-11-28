@@ -87,7 +87,7 @@ static constexpr uint8_t NUM_CHANNELS = 4;
 
 /// Carrier of each channel, Hz. Index = the channel number advertised to the meter.
 static constexpr uint32_t CHANNEL_CARRIER_HZ[NUM_CHANNELS] = {
-    433820000u,  // ch0 - the meter's wake frequency; also the alternative-mode TX carrier
+    433820000u,  // ch0 - the meter's wake frequency; also the (only) TX carrier
     433300000u,  // ch1
     434260000u,  // ch2 - the default; the most reliable reply carrier observed
     434700000u,  // ch3
@@ -144,8 +144,8 @@ class RadioHal {
 
   /// RECEIVE carrier, in Hz.
   ///
-  /// RF433-1 can receive on a different channel than it transmits on. With the
-  /// alternative channel table the CIU always transmits on 433.82 MHz - the
+  /// RF433-1 can receive on a different channel than it transmits on. The CIU
+  /// always transmits on 433.82 MHz - the
   /// meter's wake frequency - while the meter replies on the advertised channel's
   /// carrier. That is not an offset from the TX carrier; it is an independent,
   /// runtime-settable frequency, and it is why this method exists at all.

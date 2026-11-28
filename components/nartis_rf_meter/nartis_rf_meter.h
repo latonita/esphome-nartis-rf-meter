@@ -92,20 +92,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
                        : static_cast<int8_t>(DEFAULT_REPLY_CHANNEL);
   }
 
-  /// Use the alternative channel mode instead of the default channel grid: TX
-  /// stays on ch0/433.82 (the meter's wake frequency) while RX follows the
-  /// advertised channel's carrier. Those carriers are the meter's
-  /// actually-observed reply frequencies, so a 100 kHz + AFC RX can capture
-  /// them; in the default mode TX hops with RX and the meter is 97..278 kHz off
-  /// and missed. Default: default mode. Enabling this also enables RX
-  /// channel-hop acquisition (see channel_hopping_enabled_).
-  ///
-  /// The radio is not told about this flag: it only ever receives carriers in Hz
-  /// from channel_tx_hz()/channel_rx_hz() (radio_hal.h), which is where the two
-  /// modes differ.
-  /// DEPRECATED: TX is now always CH0/433.82; the flag no longer changes carriers.
-  void set_use_alternative_channels(bool enable) { use_alternative_channels_ = enable; }
-
   /// User-defined OBIS attributes read per get-request-with-list (1..10). Larger
   /// batches mean fewer cycles but bigger 0x43 responses. Default 1.
   void set_batch_size(uint8_t n) { user_batch_size_ = (n < 1) ? 1 : n; }
@@ -448,7 +434,6 @@ class NartisRfMeterComponent : public esphome::PollingComponent {
   // single cycle (counters are saved at end-of-cycle and on abort).
   static constexpr uint32_t FRAME_COUNTER_MARGIN_ = 256;
 
-  bool use_alternative_channels_{false};  // selects the TX carrier rule; gates channel hopping
   uint8_t active_channel_{2};   // advertised+RX channel index; default ch2 = 434.26 MHz reply
   bool channel_locked_{false};  // true once the meter has replied on active_channel_
   uint8_t channel_hop_count_{0};

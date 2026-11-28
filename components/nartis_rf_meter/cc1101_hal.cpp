@@ -869,8 +869,8 @@ bool Cc1101Hal::begin_rx() {
     return false;
   }
 
-  // RX is an independent carrier, not an offset from TX: in alternative-channel mode
-  // the CIU keeps transmitting on 433.82 MHz while the meter replies on the
+  // RX is an independent carrier, not an offset from TX: the CIU always keeps
+  // transmitting on 433.82 MHz while the meter replies on the
   // advertised channel's carrier. set_rx_frequency() supplies that carrier and the
   // YAML rx_offset nudges it; no IF term is applied, because this part is not a
   // low-IF receiver (see freq_word_for_()).
@@ -1246,7 +1246,7 @@ void Cc1101Hal::dump_config() {
       (256.0f + (float) CC1101_DRATE_M) * (float) (1u << CC1101_DRATE_E) * (float) CC1101_XTAL_HZ / 268435456.0f;
 
   // TX and RX are printed separately and in full because on this protocol they are
-  // genuinely different carriers in alternative-channel mode - a reader checking a
+  // genuinely different carriers (TX always ch0) - a reader checking a
   // "why does the meter not answer" log needs to see both, not one and an offset.
   ESP_LOGCONFIG(TAG, "  TX carrier: %.4f MHz (FREQ=0x%06" PRIX32 ", %+d Hz off the %.3f MHz channel)",
                 tx_hz / 1e6f, tx_word, (int) ((int32_t) tx_hz - (int32_t) this->freq_hz_),

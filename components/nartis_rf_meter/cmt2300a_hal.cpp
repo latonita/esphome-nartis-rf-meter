@@ -232,8 +232,8 @@ void Cmt2300aHal::write_full_config() {
   write_bank(SYSTEM_BANK_ADDR, NARTIS_SYSTEM_BANK, SYSTEM_BANK_SIZE);
   // Frequency bank: both halves of channel 0, exactly as the old
   // set_frequency_channel(0) wrote here. Channel 0 is the only row whose bytes
-  // are the same in the default and the alternative channel mode, so this
-  // initial write never depended on which mode the YAML selected - and the
+  // are the same in the old default and alternative channel tables, so this
+  // initial write never depended on which one was in use - and the
   // component reprograms both halves at CHANNEL_SELECT before any traffic.
   write_bank(FREQUENCY_BANK_ADDR, NARTIS_FREQ_CHANNELS[0], FREQUENCY_BANK_SIZE);
   tx_freq_hz_ = CHANNEL_CARRIER_HZ[0];
@@ -398,7 +398,7 @@ bool Cmt2300aHal::ensure_standby_for_freq_() {
 void Cmt2300aHal::write_freq_half_(const uint8_t *bytes4, bool rx_half) {
   // The frequency bank is 8 bytes: [0..3] = RX-half (regs 0x18..0x1B, the local
   // oscillator), [4..7] = TX-half (regs 0x1C..0x1F). Writing one half leaves the
-  // other carrier alone - which is what the alternative channel mode lives on:
+  // other carrier alone - which is what the RF433-1 channel scheme relies on:
   // RX hops while TX stays on the meter's wake frequency.
   write_bank(rx_half ? FREQUENCY_BANK_ADDR : (uint8_t) (FREQUENCY_BANK_ADDR + 4), bytes4, 4);
 }

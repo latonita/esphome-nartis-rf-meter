@@ -386,12 +386,11 @@ static constexpr uint8_t NARTIS_TX_BANK[11] = {
  * there. Running AN199 forward over those four carriers reproduces all 32 bytes
  * below exactly, which is how the two were checked against each other.
  *
- * The alternative channel mode (YAML `use_alternative_channels: true`, the
- * MEASURED meter reply behaviour) used to have its own byte table here. It did
- * not need one: every entry of it was this table's RX-half for channel i paired
- * with this table's TX-half for channel 0. That is now expressed where it
- * belongs, as channel_tx_hz(ch, alternative) in radio_hal.h, so the two tables
- * can no longer drift apart.
+ * The old alternative channel mode (YAML `use_alternative_channels`, now a
+ * deprecated no-op) used to have its own byte table here. It did not need one:
+ * every entry of it was this table's RX-half for channel i paired with this
+ * table's TX-half for channel 0 - which is now the only mode: radio_hal.h's
+ * channel_tx_hz() always returns ch0 and channel_rx_hz(ch) the reply carrier.
  */
 static constexpr uint8_t NARTIS_FREQ_CHANNELS[4][8] = {
     {0x42, 0x6D, 0x8F, 0x1C, 0x42, 0x57, 0xDD, 0x1B},  // CH0: RX LO 434.10 (recv 433.82) / TX 433.82 MHz

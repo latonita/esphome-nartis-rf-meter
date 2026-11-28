@@ -38,8 +38,8 @@
  *     direction. See the long sync-word note in cc1101_defs.h for how that byte
  *     order is established, why it contradicts fw/RF_PHY_SPEC.md sec. 4.4, and why a
  *     32-bit sync word is not implementable on this part regardless.
- *   - RF433-1 transmits and receives on DIFFERENT carriers in alternative-channel
- *     mode, so set_frequency() and set_rx_frequency() are independent and both are
+ *   - RF433-1 transmits and receives on DIFFERENT carriers (TX always on ch0),
+ *     so set_frequency() and set_rx_frequency() are independent and both are
  *     reprogrammed on every channel hop. The CC1101 is a true-frequency radio:
  *     both are programmed as the carrier, with NO IF offset. CHANNEL_LOW_IF_HZ in
  *     radio_hal.h is CMT2300A context and must not be applied here.
@@ -215,7 +215,7 @@ class Cc1101Hal : public RadioHal {
   void set_frequency(uint32_t freq_hz) override;
 
   /// RECEIVE carrier, Hz. Independent of the transmit carrier, because RF433-1's
-  /// alternative channel mode holds TX on 433.82 MHz (the meter's wake frequency)
+  /// channel scheme holds TX on 433.82 MHz (the meter's wake frequency)
   /// while the meter replies on the advertised channel's carrier. Programmed by
   /// begin_rx(), with set_rx_offset_hz() added.
   void set_rx_frequency(uint32_t freq_hz) override;
